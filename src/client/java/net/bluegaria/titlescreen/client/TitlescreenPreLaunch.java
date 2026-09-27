@@ -2,7 +2,7 @@ package net.bluegaria.titlescreen.client;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import net.bluegaria.titlescreen.client.video.VlcVideoPlayer;
+import net.bluegaria.titlescreen.client.video.VlcNativeLibrary;
 import net.fabricmc.loader.api.FabricLoader;
 import net.fabricmc.loader.api.entrypoint.PreLaunchEntrypoint;
 import org.slf4j.Logger;
@@ -20,7 +20,7 @@ import java.nio.file.Path;
  * the window appears, but loading libVLC and its plugin dependencies takes about a second. Doing that
  * from the client initializer happens after the window has been created, so the first rendered frames
  * still showed the vanilla loading background. This entrypoint buys that second back; the native
- * preparation is cached in {@link VlcVideoPlayer}, so the regular preload later is a no-op.</p>
+ * preparation is cached in {@link VlcNativeLibrary}, so the regular preload later is a no-op.</p>
  */
 public class TitlescreenPreLaunch implements PreLaunchEntrypoint {
 
@@ -31,7 +31,7 @@ public class TitlescreenPreLaunch implements PreLaunchEntrypoint {
         String configuredPath = configuredLibVlcPath();
         LOGGER.info("Pre-launch: loading libVLC's native libraries early so the loading video's first "
                 + "frame is ready when the window appears");
-        VlcVideoPlayer.warmUpNativeLibraries(configuredPath);
+        VlcNativeLibrary.warmUp(configuredPath);
     }
 
     /**

@@ -5,7 +5,6 @@ import me.shedaniel.autoconfig.annotation.Config;
 import me.shedaniel.autoconfig.annotation.ConfigEntry;
 import net.fabricmc.loader.api.FabricLoader;
 
-import java.nio.file.Files;
 import java.nio.file.Path;
 
 /**
@@ -122,13 +121,13 @@ public class TitlescreenConfig implements ConfigData {
 
 
         /**
-         * Decode with the GPU where possible. Off by default: hardware decoding in a sandboxed launcher
-         * is unreliable here (it can drop the VP9 alpha plane, and a second concurrent player often
-         * delivers no frames at all), while software decoding always works. Turn it on if you have a
-         * large opaque video that software decoding cannot keep up with.
+         * Decode with the GPU. On by default: software decoding of a 4K source cannot keep up, which shows
+         * up as a video that stutters and then ends after a handful of frames. libVLC falls back to its
+         * software decoder when the driver cannot handle the stream, so this is safe to leave on. Turn it
+         * off only if the video fails to appear at all.
          */
         @ConfigEntry.Gui.Tooltip
-        public boolean hardwareDecoding = false;
+        public boolean hardwareDecoding = true;
 
         /**
          * Optional folder containing libvlc. Leave empty to auto-detect an installed VLC
@@ -320,12 +319,13 @@ public class TitlescreenConfig implements ConfigData {
         public boolean replayOnResourceReload = true;
 
         /**
-         * Use the intro video for the loading screen too - the intended setup for a single video that
-         * contains both scenes (Mojang/loading part first, then the intro). Leave off to keep using the
-         * separate file above.
+         * Use the intro video for the loading screen too: one file that contains both scenes, the
+         * Mojang/loading part first and the intro after it. This is the recommended setup and the default;
+         * it means one player, one decoder and no hand-over at all. Turn it off to use the separate file
+         * above for the loading screen.
          */
         @ConfigEntry.Gui.Tooltip
-        public boolean useIntroVideo = false;
+        public boolean useIntroVideo = true;
 
         /**
          * Timestamp (ms) in the baked video at which the loading screen freezes on a frame and waits for
@@ -353,11 +353,10 @@ public class TitlescreenConfig implements ConfigData {
         return path.normalize();
     }
 
-    public boolean videoFileExists() {
-        Path path = resolveVideoPath();
-        return path != null && Files.isRegularFile(path);
-    }
-
+    /**
+     * Path of the loading scene's video: the intro video when it is baked into the loading scene (the
+     * default), otherwise the separate loading background file.
+     */
     public Path resolveLoadingBackgroundPath() {
         if (this.loadingBackground.enabled && this.loadingBackground.useIntroVideo) {
             // Single baked video: the loading scene shows the beginning of the intro video.
@@ -373,11 +372,6 @@ public class TitlescreenConfig implements ConfigData {
             path = FabricLoader.getInstance().getGameDir().resolve(path);
         }
         return path.normalize();
-    }
-
-    public boolean loadingBackgroundFileExists() {
-        Path path = resolveLoadingBackgroundPath();
-        return path != null && Files.isRegularFile(path);
     }
 
     public boolean hideSplash() {

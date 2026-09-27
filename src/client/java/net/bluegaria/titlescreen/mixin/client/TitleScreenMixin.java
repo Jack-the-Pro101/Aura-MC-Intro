@@ -57,22 +57,18 @@ public abstract class TitleScreenMixin {
      * Draws the video on top of the panorama but <em>before</em> the widgets are extracted, so the
      * title screen buttons always end up above the video.
      *
-     * <p>Both scene draws are offered, and each no-ops when it does not apply: before the hand-over the
-     * loading scene's layer is drawn, after it the intro layer is (the same layer the loading overlay's own
-     * hook uses, so this never competes for frames - it just covers the title screen). The title screen is
-     * rendered <em>underneath</em> the loading overlay, so during the overlay's fade-out, and in the gap
-     * between the overlay disappearing and the hand-over, this is the only thing covering the panorama and
-     * buttons.</p>
+     * <p>The title screen is rendered <em>underneath</em> the loading overlay, so during the overlay's
+     * fade-out, and in the gap between the overlay disappearing and the hand-over, this is the only thing
+     * covering the panorama and buttons. The manager picks the layer that fits the current scene.</p>
      */
     @Inject(
             method = "extractRenderState",
             at = @At(value = "INVOKE",
                     target = "Lnet/minecraft/client/gui/screens/Screen;extractRenderState(Lnet/minecraft/client/gui/GuiGraphicsExtractor;IIF)V",
                     shift = At.Shift.BEFORE))
-    private void titlescreen$extractVideoBehindWidgets(GuiGraphicsExtractor graphics, int mouseX, int mouseY,
-                                                       float partialTick, CallbackInfo ci) {
-        TitlescreenVideoManager.get().extractLoadingBackground(graphics);
-        TitlescreenVideoManager.get().extractVideoLayer(graphics);
+    private void titlescreen$drawVideoBehindWidgets(GuiGraphicsExtractor graphics, int mouseX, int mouseY,
+                                                    float partialTick, CallbackInfo ci) {
+        TitlescreenVideoManager.get().drawTitleScreenVideo(graphics);
     }
 
     @Redirect(

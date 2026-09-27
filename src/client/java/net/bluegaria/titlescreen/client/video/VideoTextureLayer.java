@@ -13,11 +13,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Owns the GPU texture for one video and knows how to draw it through Minecraft's GUI render state.
+ * Owns the GPU texture for one scene's video and knows how to draw it through Minecraft's GUI render
+ * state.
  *
- * <p>libVLC scales the decoded picture into an alignment padded buffer, so the whole texture is
- * drawn while the aspect ratio for the destination rectangle comes from the real track size
- * ({@link VideoPlayer#sourceWidth()}).</p>
+ * <p>libVLC scales the decoded picture into an alignment padded buffer, so the whole texture is drawn
+ * while the aspect ratio for the destination rectangle comes from the real track size
+ * ({@link VideoPlayer#sourceWidth()}). Frames themselves are copied in by {@link VideoFrameSink}.</p>
  */
 public final class VideoTextureLayer {
 
@@ -25,17 +26,14 @@ public final class VideoTextureLayer {
 
     private final Identifier identifier;
     private final String label;
-    /** When true the video's own transparency is dropped, so it works as an opaque background. */
-    private final boolean opaque;
 
     private DynamicTexture texture;
     /** A texture for a new frame size, kept out of sight until it has received a frame. */
     private DynamicTexture pendingTexture;
 
-    public VideoTextureLayer(String namespace, String path, String label, boolean opaque) {
+    public VideoTextureLayer(String namespace, String path, String label) {
         this.identifier = Identifier.fromNamespaceAndPath(namespace, path);
         this.label = label;
-        this.opaque = opaque;
     }
 
     /**
@@ -44,29 +42,7 @@ public final class VideoTextureLayer {
      * @return {@code true} when a new frame actually reached the texture
      */
     public boolean upload(VideoPlayer player, int maxFps) {
-        return upload(player, maxFps, this.opaque);
-    }
-
-    /**
-     * Same as {@link #upload(VideoPlayer, int)}, but the video's transparency can be overridden for this
-     * upload. The intro layer needs that: while the loading scene still covers the screen its video has to
-     * be opaque (it is a background there), and only on the title screen does its alpha matter.
-     */
-    public boolean upload(VideoPlayer player, int maxFps, boolean forceOpaque) {
-        VideoFrameSink sink = player.sink();
-        int bufferWidth = sink.width();
-        int bufferHeight = sink.height();
-        if (bufferWidth <= 0 || bufferHeight <= 0) {
-            return false;
-        }
-        DynamicTexture target = targetFor(bufferWidth, bufferHeight);
-        if (!sink.uploadIfDirty(target, maxFps, forceOpaque)) {
-            return false;
-        }
-        if (target != this.texture) {
-            promote(target, bufferWidth, bufferHeight);
-        }
-        return true;
+        return copyInto(player, maxFps, false);
     }
 
     /**
@@ -75,7 +51,11 @@ public final class VideoTextureLayer {
      * <p>Used before the scene that shows the video becomes visible - see
      * {@link VideoFrameSink#uploadLatest}.</p>
      */
-    public boolean warmUp(VideoPlayer player, boolean forceOpaque) {
+    public boolean warmUp(VideoPlayer player) {
+        return copyInto(player, 0, true);
+    }
+
+    private boolean copyInto(VideoPlayer player, int maxFps, boolean latest) {
         VideoFrameSink sink = player.sink();
         int bufferWidth = sink.width();
         int bufferHeight = sink.height();
@@ -83,7 +63,8 @@ public final class VideoTextureLayer {
             return false;
         }
         DynamicTexture target = targetFor(bufferWidth, bufferHeight);
-        if (!sink.uploadLatest(target, forceOpaque)) {
+        boolean uploaded = latest ? sink.uploadLatest(target) : sink.uploadIfDirty(target, maxFps);
+        if (!uploaded) {
             return false;
         }
         if (target != this.texture) {
@@ -179,8 +160,6 @@ public final class VideoTextureLayer {
             this.pendingTexture = null;
         }
     }
-
-
 
     /**
      * Computes the destination rectangle plus the texture coordinates.

@@ -2,7 +2,6 @@ package net.bluegaria.titlescreen.client.video;
 
 import net.bluegaria.titlescreen.client.config.TitlescreenConfig;
 import net.bluegaria.titlescreen.client.config.TitlescreenConfigHolder;
-import net.bluegaria.titlescreen.mixin.client.GuiGraphicsExtractorInvoker;
 import net.bluegaria.titlescreen.mixin.client.LoadingOverlayAccessor;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
@@ -18,24 +17,27 @@ import net.minecraft.util.Util;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
-import java.io.InputStream;
-import org.lwjgl.system.MemoryUtil;
 
-import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
-import java.nio.file.StandardCopyOption;
 import java.util.Optional;
 
 /**
- * Drives the whole intro: when the video starts, when the vanilla progress bar fades, when the
- * loading overlay is unloaded, when the buttons fade in and what happens at the end of the video.
+ * Drives the whole video intro: the loading scene's background, the hand-over to the title screen, the
+ * button and progress-bar timing and what happens when the video ends.
  *
- * <p>All methods that touch Minecraft state are called from the client/render thread (client tick
- * events, mixin callbacks during rendering). Frames are decoded on libVLC's own threads, so the
- * only per-frame cost here is a single texture upload.</p>
+ * <p>There are two scenes and, per scene, one video layer. The loading scene draws its video behind the
+ * loading bar and freezes on a frame until the game has finished loading; the title screen then continues
+ * from exactly that frame. With a single baked video ({@code loadingBackground.useIntroVideo}) one player
+ * and one texture serve both scenes, so the hand-over costs nothing: no second player, no second decoder,
+ * no seek, no stutter.</p>
+ *
+ * <p>Everything here runs on the client/render thread (client tick events, mixin callbacks during
+ * rendering) and never calls libVLC: decoding happens on libVLC's threads, control calls on
+ * {@link VlcVideoPlayer}'s command thread. Per frame this class copies one decoded frame into a texture
+ * and draws it once per scene, and all of its diagnostic reporting sits behind the {@code debugLogging}
+ * config option.</p>
  */
 public final class TitlescreenVideoManager {
 
@@ -44,20 +46,14 @@ public final class TitlescreenVideoManager {
     /** How many times starting the intro video is retried after a failed attempt. */
     private static final int MAX_SESSION_START_ATTEMPTS = 3;
     private static final TitlescreenVideoManager INSTANCE = new TitlescreenVideoManager();
-    private static final String BUNDLED_VIDEO_RESOURCE = "/assets/titlescreen/video/default_intro.webm";
-    private static final String BUNDLED_LOADING_BACKGROUND_RESOURCE =
-            "/assets/titlescreen/video/mojang_studios.webm";
 
     private VideoPlayer player = new VlcVideoPlayer();
     private VideoPlayer backgroundPlayer = new VlcVideoPlayer();
 
     private final VideoTextureLayer introTexture =
-            new VideoTextureLayer("titlescreen", "video_frame", "Titlescreen intro video", false);
-    // The loading scene is a background: it is drawn opaque so the vanilla loading screen can never
-    // show through the video's transparent pixels (which is how it looked before the video's alpha
-    // channel started being respected for the intro).
+            new VideoTextureLayer("titlescreen", "video_frame", "Titlescreen intro video");
     private final VideoTextureLayer backgroundTexture =
-            new VideoTextureLayer("titlescreen", "loading_background_frame", "Titlescreen loading background", true);
+            new VideoTextureLayer("titlescreen", "loading_background_frame", "Titlescreen loading background");
 
     private boolean anchorSet;
     private LoadingOverlay anchoredOverlay;
@@ -86,7 +82,6 @@ public final class TitlescreenVideoManager {
     /** Set once a player failed to deliver frames with hardware decoding - later players use software. */
     private boolean forceSoftwareDecoding;
 
-    private long lastWaitReportMs;
     private boolean watchdogStarted;
     private boolean stallDumpReported;
     /** Playback progress tracking: a video that stops delivering frames must not hold a scene. */
@@ -193,7 +188,9 @@ public final class TitlescreenVideoManager {
             this.sessionStartFailures++;
             this.lastSessionFailureMs = Util.getMillis();
             this.t0Ms = Util.getMillis() + cfg.timing.videoStartDelayMs;
-            LOGGER.info("Retrying the video intro start (attempt {})", this.sessionStartFailures + 1);
+            if (cfg.general.debugLogging) {
+                LOGGER.info("Retrying the video intro start (attempt {})", this.sessionStartFailures + 1);
+            }
             if (!beginSession(cfg)) {
                 this.lastSessionFailureMs = Util.getMillis();
                 this.failed = true;
@@ -282,15 +279,9 @@ public final class TitlescreenVideoManager {
     }
 
     // ------------------------------------------------------------------
-    // Loading screen background video
+    // Diagnostics (debug logging only)
     // ------------------------------------------------------------------
 
-    /**
-     * Called once at client startup so the background video's first frame is decoded and waiting before
-     * the loading screen appears - otherwise the vanilla loading screen flashes before the video shows
-     * up. The preload plays silently (volume 0, see {@link #preloadLoadingBackground()}), so nothing is
-     * heard while the game window is still being set up. Safe to call more than once.
-     */
     /**
      * Traces one line per hand-over step while the hand-over is in progress (debug logging only).
      *
@@ -311,6 +302,16 @@ public final class TitlescreenVideoManager {
         LOGGER.info("Hand-over [{}] {}", event, detail);
     }
 
+    // ------------------------------------------------------------------
+    // Loading screen background video
+    // ------------------------------------------------------------------
+
+    /**
+     * Called once at client startup so the background video's first frame is decoded and waiting before
+     * the loading screen appears - otherwise the vanilla loading screen flashes before the video shows
+     * up. The preload plays silently (volume 0, see {@link #preloadLoadingBackground()}), so nothing is
+     * heard while the game window is still being set up. Safe to call more than once.
+     */
     public void preloadLoadingBackgroundOnce() {
         if (this.backgroundPreloadTriggered) {
             return;
@@ -380,10 +381,13 @@ public final class TitlescreenVideoManager {
         if (path == null) {
             return;
         }
-        if (!Files.isRegularFile(path) && !extractBundledLoadingBackground(cfg, path)) {
+        if (!Files.isRegularFile(path) && !VideoAssets.ensureLoadingBackground(cfg, path)) {
             LOGGER.info("No loading background video available - the vanilla loading screen is used");
             return;
         }
+        // The loading scene is a background: dropping its alpha happens on libVLC's thread, which
+        // is far cheaper than masking every 4K frame on the render thread.
+        this.backgroundPlayer.sink().setForceOpaque(true);
         this.backgroundPreloadRequested = true;
         Thread thread = new Thread(() -> {
             this.backgroundPlayer.setDebugLogging(cfg.general.debugLogging);
@@ -454,7 +458,7 @@ public final class TitlescreenVideoManager {
             this.backgroundFailed = true;
             return;
         }
-        if (!Files.isRegularFile(path) && !extractBundledLoadingBackground(cfg, path)) {
+        if (!Files.isRegularFile(path) && !VideoAssets.ensureLoadingBackground(cfg, path)) {
             LOGGER.warn("Loading background video '{}' was not found - keeping the vanilla loading screen",
                     cfg.loadingBackground.videoPath);
             this.backgroundFailed = true;
@@ -565,49 +569,22 @@ public final class TitlescreenVideoManager {
                 || Util.getMillis() - this.anchorSetMs > HANDOVER_TIMEOUT_MS;
     }
 
-    /** Called before the MOJANG logo is drawn: puts the background video behind the loading bar. */
-    public void extractLoadingBackground(GuiGraphicsExtractor graphics) {
+    /**
+     * Loading overlay, before its logo is drawn: the video behind the loading bar.
+     *
+     * <p>The preload decodes the first frame and holds it paused before the loading screen appears, so that
+     * frame can be drawn on the very first rendered frame. Waiting for the tick to activate the background
+     * instead makes the vanilla loading background show for the first frame or two - and the first frame of
+     * a resource reload is slow, so that gap is very visible.</p>
+     */
+    public void drawLoadingBackground(GuiGraphicsExtractor graphics) {
         TitlescreenConfig cfg = TitlescreenConfigHolder.get();
-        if (!cfg.general.enabled || !cfg.loadingBackground.enabled || this.backgroundFailed
-                || graphics == null) {
-            return;
-        }
         VideoPlayer player = this.backgroundPlayer;
-        if (player == null) {
+        if (!cfg.general.enabled || !cfg.loadingBackground.enabled || this.backgroundFailed
+                || this.loadingLayerRetired || graphics == null || player == null) {
             return;
         }
-        VideoFrameSink preloadSink = player.sink();
-        // The preload decodes the first frame and holds it paused before the loading screen appears, so
-        // that frame can be drawn on the very first rendered frame. Waiting for the tick to activate the
-        // background instead makes the vanilla loading background show for the first frame or two - and
-        // the first frame of a resource reload is slow, so that gap is very visible.
-        boolean preloadedFrame = !this.backgroundActive && preloadSink.width() > 0 && preloadSink.height() > 0;
-        if (!this.backgroundActive && !preloadedFrame) {
-            return;
-        }
-        logFirstFrameOnScreen();
-
-        if (isBakedVideo(cfg) && this.sessionActive && this.introVisible) {
-            // Same video, same player: the intro is simply the continuation of what is already on screen.
-            // Draw it through the intro layer here, but opaque - the loading scene is a background, so the
-            // video's transparency must not reveal the vanilla loading screen. This upload is also what
-            // locks the intro timeline, and it has to be the only one in the frame: both layers copy out of
-            // the sink's single frame slot, so warming the intro up next to the loading layer starved the
-            // picture that was actually on screen.
-            traceHandOver("overlay draw", "drawing the intro layer over the still-present overlay");
-            this.extractVideoLayer(graphics, true);
-            return;
-        }
-
-        if (this.loadingLayerRetired) {
-            // The hand-over already happened, so the video belongs to the title screen now: the intro layer
-            // draws it there. Anything reaching this point would be the loading layer showing whatever frame
-            // it was left on - the frozen hold frame - which is not what is on screen any more.
-            return;
-        }
-
-        VideoFrameSink sink = player.sink();
-        if (sink.width() <= 0 || sink.height() <= 0) {
+        if (!this.backgroundActive && !hasFrame(player)) {
             return;
         }
         if (this.backgroundTexture.upload(player, cfg.loadingBackground.maxFps)) {
@@ -625,8 +602,11 @@ public final class TitlescreenVideoManager {
             return;
         }
         logFirstFrameOnScreen();
-
         this.backgroundTexture.draw(graphics, player, cfg.loadingBackground.fit, alpha);
+    }
+
+    private static boolean hasFrame(VideoPlayer player) {
+        return player != null && player.sink().width() > 0 && player.sink().height() > 0;
     }
 
     /**
@@ -682,13 +662,15 @@ public final class TitlescreenVideoManager {
             this.lastIntroUploadMs = Util.getMillis();
             this.player.setVolume(cfg.video.videoVolume);
             this.player.setPaused(false);
-            LOGGER.info("Video intro continues from the held frame ({} ms)",
-                    cfg.loadingBackground.holdAtMs);
+            if (cfg.general.debugLogging) {
+                LOGGER.info("Video intro continues from the held frame ({} ms)",
+                        cfg.loadingBackground.holdAtMs);
+            }
             // The layer that draws the video has to hold a frame before anything can expose the title
             // screen. Vanilla's own overlay fade-out can remove the loading overlay the moment the reload
             // finishes (before this mod's hold takes effect), and an empty layer means the title screen is
             // drawn with nothing over it - the panorama and buttons flash through until the next frame.
-            this.introTexture.warmUp(this.player, true);
+            this.introTexture.warmUp(this.player);
             traceHandOver("anchor", "sessionActive + introVisible, holdAtMs=" + cfg.loadingBackground.holdAtMs);
             return;
         }
@@ -732,46 +714,6 @@ public final class TitlescreenVideoManager {
 
 
 
-    /**
-     * Copies the transparent placeholder clip shipped inside the mod jar to the configured path so
-     * that the mod does something sensible out of the box. The player can then simply replace that
-     * file with their own video.
-     */
-    private static boolean extractBundledDefaultVideo(TitlescreenConfig cfg, Path target) {
-        if (!cfg.general.useBundledDefaultVideo) {
-            return false;
-        }
-        return extractBundledVideo(target, BUNDLED_VIDEO_RESOURCE);
-    }
-
-    /** Copies the bundled loading screen background clip to the configured path when it is missing. */
-    private static boolean extractBundledLoadingBackground(TitlescreenConfig cfg, Path target) {
-        if (!cfg.loadingBackground.useBundledDefaultVideo) {
-            return false;
-        }
-        return extractBundledVideo(target, BUNDLED_LOADING_BACKGROUND_RESOURCE);
-    }
-
-    private static boolean extractBundledVideo(Path target, String resource) {
-        try (InputStream in = TitlescreenVideoManager.class.getResourceAsStream(resource)) {
-            if (in == null) {
-                LOGGER.warn("The bundled video ({}) is missing from the mod jar", resource);
-                return false;
-            }
-            Path parent = target.getParent();
-            if (parent != null) {
-                Files.createDirectories(parent);
-            }
-            Files.copy(in, target, StandardCopyOption.REPLACE_EXISTING);
-            LOGGER.info("Copied the bundled video {} to {} - replace it with your own video any time",
-                    resource, target);
-            return true;
-        } catch (IOException e) {
-            LOGGER.warn("Could not extract the bundled video {} to {}", resource, target, e);
-            return false;
-        }
-    }
-
     /** Starts libVLC on a background thread so the first real frame never blocks loading. */
     private boolean beginSession(TitlescreenConfig cfg) {
         Path path = cfg.resolveVideoPath();
@@ -779,7 +721,7 @@ public final class TitlescreenVideoManager {
             LOGGER.warn("No video path configured - skipping the video intro (vanilla behaviour is kept)");
             return false;
         }
-        if (!Files.isRegularFile(path) && !extractBundledDefaultVideo(cfg, path)) {
+        if (!Files.isRegularFile(path) && !VideoAssets.ensureIntro(cfg, path)) {
             LOGGER.warn("Video file '{}' was not found - skipping the video intro (vanilla behaviour is kept)",
                     cfg.video.videoPath);
             return false;
@@ -867,7 +809,6 @@ public final class TitlescreenVideoManager {
         }
     }
 
-    /** Tears the current session down and allows a later one to start. */
     /** True when one baked video provides both the loading scene and the intro. */
     private static boolean isBakedVideo(TitlescreenConfig cfg) {
         return cfg.general.enabled && cfg.loadingBackground.enabled && cfg.loadingBackground.useIntroVideo;
@@ -1025,8 +966,10 @@ public final class TitlescreenVideoManager {
                 && this.backgroundPlayer.cachedTimeMs() >= cfg.loadingBackground.holdAtMs) {
             this.backgroundFrozen = true;
             this.backgroundPlayer.setPaused(true);
-            LOGGER.info("Loading background video held at {} ms - waiting for the game to finish loading",
-                    cfg.loadingBackground.holdAtMs);
+            if (cfg.general.debugLogging) {
+                LOGGER.info("Loading background video held at {} ms - waiting for the game to finish loading",
+                        cfg.loadingBackground.holdAtMs);
+            }
         }
 
         if (this.backgroundPlayer != this.player && this.backgroundActive && !this.backgroundFrozen) {
@@ -1249,45 +1192,50 @@ public final class TitlescreenVideoManager {
     // ------------------------------------------------------------------
 
     /**
-     * Called once per frame - drawn on top of the loading overlay or behind the title buttons.
+    /**
+     * Title screen, before its widgets: draws whichever layer belongs to the current scene.
      *
-     * <p>A baked video is drawn opaque here as well, because it is the same video that served as the loading
-     * background: it has to composite the same way in both scenes. Respecting its alpha only from the
-     * hand-over on made that transition a hard switch - the loading scene covered the screen completely,
-     * and then the title screen's panorama and buttons showed through the video until its content happened
-     * to be opaque again.</p>
+     * <p>Before the hand-over that is the loading scene's layer - the title screen is rendered underneath
+     * the loading overlay, so during the overlay's fade-out it is the only thing over the panorama - and
+     * afterwards the intro layer. Exactly one layer is drawn, once per frame.</p>
      */
-    public void extractVideoLayer(GuiGraphicsExtractor graphics) {
-        this.extractVideoLayer(graphics, isBakedVideo(TitlescreenConfigHolder.get()));
+    public void drawTitleScreenVideo(GuiGraphicsExtractor graphics) {
+        if (this.sessionActive && this.introVisible) {
+            drawIntroVideo(graphics);
+            return;
+        }
+        drawLoadingBackground(graphics);
     }
 
     /**
-     * @param opaque {@code true} while the loading scene still covers the screen: there the video is a
-     *               background and must not let the vanilla loading screen show through its transparent
-     *               pixels. On the title screen the video's own alpha is wanted, so it is {@code false}.
+     * The intro layer, wherever it is drawn: over the loading overlay while it is held, and on the title
+     * screen once the hand-over happened.
+     *
+     * <p>A baked video composites the same way in both scenes (it was the loading scene's background, and
+     * its alpha is dropped by the player's frame sink), so the hand-over is not a visible switch.</p>
      */
-    private void extractVideoLayer(GuiGraphicsExtractor graphics, boolean opaque) {
+    public void drawIntroVideo(GuiGraphicsExtractor graphics) {
         TitlescreenConfig cfg = TitlescreenConfigHolder.get();
         if (!cfg.general.enabled || this.failed || this.ended || !this.sessionActive
                 || !this.introVisible || graphics == null) {
-            if (!this.layerSkipReported) {
+            if (cfg.general.debugLogging && this.anchorSet && !this.layerSkipReported) {
                 this.layerSkipReported = true;
-                LOGGER.warn("Video layer not drawn on the title screen (enabled={} failed={} ended={} "
-                                + "session={} visible={}) - whatever is behind it, such as the panorama and "
-                                + "buttons, will be visible",
+                LOGGER.warn("Intro video not drawn on the title screen (enabled={} failed={} ended={} "
+                                + "session={} visible={}) - the panorama and buttons behind it will be "
+                                + "visible",
                         cfg.general.enabled, this.failed, this.ended, this.sessionActive, this.introVisible);
             }
             return;
         }
 
-        this.uploadIntroFrame(cfg, cfg.video.videoMaxFps, opaque);
+        this.uploadIntroFrame(cfg, cfg.video.videoMaxFps);
 
         float alpha = videoAlpha(cfg);
         if (alpha <= 0.004F) {
             return;
         }
         traceHandOver("title draw", "alpha=" + alpha + " introFramesUploaded=" + this.introFramesUploaded
-                + " overlayPresent=" + (net.minecraft.client.Minecraft.getInstance().gui.overlay() != null));
+                + " overlayPresent=" + (Minecraft.getInstance().gui.overlay() != null));
         this.introTexture.draw(graphics, this.player, cfg.video.videoFit, alpha);
     }
 
@@ -1300,12 +1248,12 @@ public final class TitlescreenVideoManager {
      *
      * @return {@code true} when a frame reached the texture
      */
-    private boolean uploadIntroFrame(TitlescreenConfig cfg, int maxFps, boolean opaque) {
+    private boolean uploadIntroFrame(TitlescreenConfig cfg, int maxFps) {
         VideoFrameSink sink = this.player.sink();
         if (sink.width() <= 0 || sink.height() <= 0) {
             return false;
         }
-        boolean uploaded = this.introTexture.upload(this.player, maxFps, opaque);
+        boolean uploaded = this.introTexture.upload(this.player, maxFps);
         if (uploaded) {
             this.introFramesUploaded++;
             if (!this.timelineLocked) {

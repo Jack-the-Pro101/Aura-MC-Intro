@@ -4,56 +4,67 @@ import com.mojang.blaze3d.platform.NativeImage;
 import net.minecraft.client.renderer.texture.DynamicTexture;
 import org.lwjgl.system.MemoryUtil;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.nio.ByteBuffer;
 
 /**
- * Bridges the (native, off-thread) libVLC frame callbacks with the render thread.
+ * Bridges libVLC's frame callback thread with the render thread.
  *
- * <p>The producer writes a whole RGBA frame (top-down, 4 bytes per pixel) into an off-heap
- * staging buffer and publishes it. The render thread copies the newest published frame into
- * its own staging buffer and uploads that to a {@link DynamicTexture}. Frames that are
- * produced while the render thread is busy are simply dropped, which is exactly what we want
- * for an intro video.</p>
+ * <p>libVLC writes a whole RGBA frame (top-down) into one of two staging buffers and publishes it; the
+ * render thread copies the newest published frame straight into the texture's {@link NativeImage} and
+ * uploads it. Frames produced while the render thread is busy are dropped, which is what an intro video
+ * wants - a late frame is worse than a skipped one.</p>
+ *
+ * <p>Everything the render thread does per frame is one copy plus the upload. In particular the alpha
+ * masking for an opaque scene happens on libVLC's thread (see {@link #setForceOpaque}), where there is
+ * spare time: doing it per pixel on the render thread cost more than everything else in the frame
+ * combined at 4K.</p>
  */
 public final class VideoFrameSink {
 
     private static final int BYTES_PER_PIXEL = 4;
 
-
     private final Object lock = new Object();
 
-    private ByteBuffer[] producerBuffers = new ByteBuffer[2];
+    /** Two alternating buffers: the producer writes one while the other holds the published frame. */
+    private final ByteBuffer[] buffers = new ByteBuffer[2];
     private int writeIndex;
     private int latestIndex = -1;
     private boolean dirty;
 
-    private ByteBuffer uploadBuffer;
+    /** Read by the producer thread, set once by the scene that owns this player. */
+    private volatile boolean forceOpaque;
 
     private long producedFrames;
+    private long lastUploadNanos;
 
     private int width = -1;
     private int height = -1;
     private int visibleWidth = -1;
     private int visibleHeight = -1;
 
-    private long lastUploadNanos;
+    /**
+     * Drops this player's alpha channel while producing frames, so its picture works as an opaque
+     * background. Set for the loading scene (and for a baked single video, whose intro is composited the
+     * same way); the separate intro video keeps its transparency.
+     */
+    public void setForceOpaque(boolean forceOpaque) {
+        this.forceOpaque = forceOpaque;
+    }
 
     /**
      * Producer side. Called from a libVLC native thread.
      *
-     * @param source      direct buffer holding the first video plane
-     * @param sourcePitch row stride (in bytes) of the source plane
-     * @param visibleWidth  width of the actually visible picture (libVLC pads the buffer to an
-     *                      aligned size, so this can be smaller than {@code frameWidth})
-     * @param visibleHeight height of the actually visible picture
-     * @param bgrFallback when libVLC could not give us RGBA, the frame is BGRX and has to be
-     *                    swizzled (and given an opaque alpha channel) manually
+     * @param source        direct buffer holding the first video plane
+     * @param sourcePitch   row stride (in bytes) of the source plane
+     * @param frameWidth    width of the decoded picture
+     * @param frameHeight   height of the decoded picture
+     * @param visibleWidth  width of the visible picture (libVLC pads the buffer to an aligned size)
+     * @param visibleHeight height of the visible picture
+     * @param bgrFallback   libVLC could not give us RGBA, so the frame is BGRX and has to be swizzled
+     *                      (and given an opaque alpha channel) manually
      */
     public void offerFrame(ByteBuffer source, int sourcePitch, int frameWidth, int frameHeight,
-                           int visibleWidth, int visibleHeight, boolean bgrFallback, int maxDimension) {
+                           int visibleWidth, int visibleHeight, boolean bgrFallback) {
         if (source == null || frameWidth <= 0 || frameHeight <= 0) {
             return;
         }
@@ -61,44 +72,24 @@ public final class VideoFrameSink {
         int rowBytes = frameWidth * BYTES_PER_PIXEL;
         int pitch = sourcePitch > 0 ? sourcePitch : rowBytes;
 
-        // Very large sources (4K and up) are sampled down while copying, which keeps the per frame
-        // memory traffic and the texture upload bounded without any extra pass.
-        int step = 1;
-        if (maxDimension > 0) {
-            int largest = Math.max(frameWidth, frameHeight);
-            if (largest > maxDimension) {
-                step = (largest + maxDimension - 1) / maxDimension;
-            }
-        }
-        int outWidth = (frameWidth + step - 1) / step;
-        int outHeight = (frameHeight + step - 1) / step;
-        int outRowBytes = outWidth * BYTES_PER_PIXEL;
-
         synchronized (this.lock) {
-            if (this.width != outWidth || this.height != outHeight) {
-                this.reallocate(outWidth, outHeight);
+            if (this.width != frameWidth || this.height != frameHeight) {
+                this.reallocate(frameWidth, frameHeight);
             }
             this.visibleWidth = visibleWidth > 0 && visibleWidth <= frameWidth ? visibleWidth : frameWidth;
             this.visibleHeight = visibleHeight > 0 && visibleHeight <= frameHeight ? visibleHeight : frameHeight;
 
-            ByteBuffer target = this.producerBuffers[this.writeIndex];
+            ByteBuffer target = this.buffers[this.writeIndex];
             long sourceBase = MemoryUtil.memAddress(source);
             long targetBase = MemoryUtil.memAddress(target);
-            for (int y = 0; y < outHeight; y++) {
-                long sourceRow = sourceBase + (long) (y * step) * pitch;
-                long targetRow = targetBase + (long) y * outRowBytes;
-                if (step == 1) {
-                    MemoryUtil.memCopy(sourceRow, targetRow, rowBytes);
-                } else {
-                    for (int x = 0; x < outWidth; x++) {
-                        MemoryUtil.memCopy(sourceRow + (long) x * step * BYTES_PER_PIXEL,
-                                targetRow + (long) x * BYTES_PER_PIXEL, BYTES_PER_PIXEL);
-                    }
-                }
+            for (int y = 0; y < frameHeight; y++) {
+                MemoryUtil.memCopy(sourceBase + (long) y * pitch, targetBase + (long) y * rowBytes, rowBytes);
             }
 
             if (bgrFallback) {
-                swizzleBgrToRgba(target, outWidth * outHeight);
+                swizzleBgrToRgba(target, frameWidth * frameHeight);
+            } else if (this.forceOpaque) {
+                forceOpaqueAlpha(target, frameWidth * frameHeight);
             }
 
             // Publish the freshly written buffer and keep the other one for the next write.
@@ -109,30 +100,19 @@ public final class VideoFrameSink {
         }
     }
 
-    /** BGRX -> RGBA, also forcing the alpha channel to opaque. */
-    private static void swizzleBgrToRgba(ByteBuffer buffer, int pixelCount) {
-        java.nio.IntBuffer ints = buffer.asIntBuffer();
-        for (int i = 0; i < pixelCount; i++) {
-            int pixel = ints.get(i);
-            int red = (pixel >>> 16) & 0xFF;
-            int blue = pixel & 0xFF;
-            ints.put(i, 0xFF000000 | (blue << 16) | (pixel & 0x0000FF00) | red);
-        }
-    }
-
     /**
-     * Consumer side. Called on the render thread.
+     * Consumer side, render thread: copies the newest published frame into the texture and uploads it.
      *
-     * @param forceOpaque when {@code true} the alpha channel is overwritten with opaque, so the frame
-     *                    covers whatever is behind it - used by the loading scene, which is a
-     *                    background and must not let the vanilla loading screen show through the
-     *                    video's transparent pixels
-     * @return {@code true} when a new frame was uploaded to the texture
+     * @return {@code true} when a new frame reached the texture
      */
-    public boolean uploadIfDirty(DynamicTexture texture, int maxFps, boolean forceOpaque) {
-        ByteBuffer published;
+    public boolean uploadIfDirty(DynamicTexture texture, int maxFps) {
         synchronized (this.lock) {
             if (!this.dirty || this.latestIndex < 0 || this.width <= 0 || this.height <= 0) {
+                return false;
+            }
+            NativeImage image = texture.getPixels();
+            if (image.getWidth() != this.width || image.getHeight() != this.height) {
+                // The texture still holds a frame of another size; the layer resizes it on the next upload.
                 return false;
             }
             if (maxFps > 0) {
@@ -143,78 +123,46 @@ public final class VideoFrameSink {
                 }
                 this.lastUploadNanos = now;
             }
+            // Copied under the lock so a concurrent producer cannot reuse this buffer half-way through.
             this.dirty = false;
-            published = this.producerBuffers[this.latestIndex];
-
-            // Copy while holding the lock so a concurrent producer cannot reuse this buffer
-            // half-way through our read.
-            if (this.uploadBuffer == null) {
-                return false;
-            }
-            MemoryUtil.memCopy(MemoryUtil.memAddress(published), MemoryUtil.memAddress(this.uploadBuffer),
+            MemoryUtil.memCopy(MemoryUtil.memAddress(this.buffers[this.latestIndex]), image.getPointer(),
                     (long) this.width * this.height * BYTES_PER_PIXEL);
         }
-
-        if (forceOpaque) {
-            forceOpaqueAlpha(this.uploadBuffer, this.width * this.height);
-        }
-
-        NativeImage image = texture.getPixels();
-        if (image.getWidth() != this.width || image.getHeight() != this.height) {
-            return false;
-        }
-        MemoryUtil.memCopy(MemoryUtil.memAddress(this.uploadBuffer), image.getPointer(),
-                (long) this.width * this.height * BYTES_PER_PIXEL);
         texture.upload();
         return true;
     }
 
     /**
-     * Forces the alpha channel of every pixel to opaque. Deliberately written through the same int view
-     * as {@link #swizzleBgrToRgba}, so it never has to assume a byte order of its own.
-     */
-    private static void forceOpaqueAlpha(ByteBuffer buffer, int pixelCount) {
-        java.nio.IntBuffer ints = buffer.asIntBuffer();
-        for (int i = 0; i < pixelCount; i++) {
-            ints.put(i, ints.get(i) | 0xFF000000);
-        }
-    }
-
-    /**
-     * Copies the newest published frame into the texture regardless of the dirty flag.
+     * Consumer side, render thread: copies the published frame into the texture even when no new frame
+     * has arrived.
      *
-     * <p>Used to put the video on screen before the scene that shows it appears. The frame is already decoded
-     * and being held (the loading scene pauses on it), so waiting for the next dirty frame would leave the
-     * first frames of the next scene with nothing drawn - the panorama and buttons flash through instead.</p>
+     * <p>Used to put the video on screen before the scene that shows it appears. The frame is already
+     * decoded and being held (the loading scene pauses on it), so waiting for the next dirty frame would
+     * leave the first frames of the next scene with nothing drawn - the panorama and buttons flash
+     * through instead.</p>
+     *
+     * @return {@code true} when the texture now holds the frame
      */
-    public boolean uploadLatest(DynamicTexture texture, boolean forceOpaque) {
-        ByteBuffer published;
+    public boolean uploadLatest(DynamicTexture texture) {
         synchronized (this.lock) {
-            if (this.latestIndex < 0 || this.width <= 0 || this.height <= 0 || this.uploadBuffer == null) {
+            if (this.latestIndex < 0 || this.width <= 0 || this.height <= 0) {
                 return false;
             }
-            published = this.producerBuffers[this.latestIndex];
-            MemoryUtil.memCopy(MemoryUtil.memAddress(published), MemoryUtil.memAddress(this.uploadBuffer),
+            NativeImage image = texture.getPixels();
+            if (image.getWidth() != this.width || image.getHeight() != this.height) {
+                return false;
+            }
+            MemoryUtil.memCopy(MemoryUtil.memAddress(this.buffers[this.latestIndex]), image.getPointer(),
                     (long) this.width * this.height * BYTES_PER_PIXEL);
         }
-        if (forceOpaque) {
-            forceOpaqueAlpha(this.uploadBuffer, this.width * this.height);
-        }
-        NativeImage image = texture.getPixels();
-        if (image.getWidth() != this.width || image.getHeight() != this.height) {
-            return false;
-        }
-        MemoryUtil.memCopy(MemoryUtil.memAddress(this.uploadBuffer), image.getPointer(),
-                (long) this.width * this.height * BYTES_PER_PIXEL);
         texture.upload();
         return true;
     }
 
     /**
-     * How many frames libVLC has delivered so far. This is deliberately independent of our render
-     * thread: it only tells whether the video output is still producing frames at all, which is what
-     * "is this playback stalled" has to be based on (using the uploaded-frame count meant that a busy
-     * loading screen looked like a stalled video).
+     * How many frames libVLC has delivered. Deliberately independent of the render thread: it only says
+     * whether the video output is producing frames at all, which is what "is this playback stalled" has
+     * to be based on (the uploaded-frame count made a busy loading screen look like a stalled video).
      */
     public long producedFrames() {
         return this.producedFrames;
@@ -240,12 +188,10 @@ public final class VideoFrameSink {
 
     public void close() {
         synchronized (this.lock) {
-            for (int i = 0; i < this.producerBuffers.length; i++) {
-                MemoryUtil.memFree(this.producerBuffers[i]);
-                this.producerBuffers[i] = null;
+            for (int i = 0; i < this.buffers.length; i++) {
+                MemoryUtil.memFree(this.buffers[i]);
+                this.buffers[i] = null;
             }
-            MemoryUtil.memFree(this.uploadBuffer);
-            this.uploadBuffer = null;
             this.width = -1;
             this.height = -1;
             this.visibleWidth = -1;
@@ -261,14 +207,32 @@ public final class VideoFrameSink {
         this.width = frameWidth;
         this.height = frameHeight;
         long size = (long) frameWidth * frameHeight * BYTES_PER_PIXEL;
-        for (int i = 0; i < this.producerBuffers.length; i++) {
-            MemoryUtil.memFree(this.producerBuffers[i]);
-            this.producerBuffers[i] = MemoryUtil.memAlloc((int) size);
+        for (int i = 0; i < this.buffers.length; i++) {
+            MemoryUtil.memFree(this.buffers[i]);
+            this.buffers[i] = MemoryUtil.memAlloc((int) size);
         }
-        MemoryUtil.memFree(this.uploadBuffer);
-        this.uploadBuffer = MemoryUtil.memAlloc((int) size);
         this.writeIndex = 0;
         this.latestIndex = -1;
         this.dirty = false;
+    }
+
+    /** BGRX -> RGBA, also forcing the alpha channel to opaque. */
+    private static void swizzleBgrToRgba(ByteBuffer buffer, int pixelCount) {
+        java.nio.IntBuffer ints = buffer.asIntBuffer();
+        for (int i = 0; i < pixelCount; i++) {
+            int pixel = ints.get(i);
+            int red = (pixel >>> 16) & 0xFF;
+            int blue = pixel & 0xFF;
+            ints.put(i, 0xFF000000 | (blue << 16) | (pixel & 0x0000FF00) | red);
+        }
+    }
+
+    /** Sets the alpha channel of every pixel to opaque, keeping the colour channels untouched. */
+    private static void forceOpaqueAlpha(ByteBuffer buffer, int pixelCount) {
+        long base = MemoryUtil.memAddress(buffer);
+        for (int i = 0; i < pixelCount; i++) {
+            long address = base + (long) i * 4L;
+            MemoryUtil.memPutInt(address, MemoryUtil.memGetInt(address) | 0xFF000000);
+        }
     }
 }

@@ -56,9 +56,9 @@ public abstract class LoadingOverlayMixin {
                     target = "Lnet/minecraft/client/gui/GuiGraphicsExtractor;blit(Lcom/mojang/blaze3d/pipeline/RenderPipeline;Lnet/minecraft/resources/Identifier;IIFFIIIIIII)V",
                     ordinal = 0,
                     shift = At.Shift.BEFORE))
-    private void titlescreen$extractLoadingBackground(GuiGraphicsExtractor graphics, int mouseX, int mouseY,
-                                                      float partialTick, CallbackInfo ci) {
-        TitlescreenVideoManager.get().extractLoadingBackground(graphics);
+    private void titlescreen$drawLoadingBackground(GuiGraphicsExtractor graphics, int mouseX, int mouseY,
+                                                   float partialTick, CallbackInfo ci) {
+        TitlescreenVideoManager.get().drawLoadingBackground(graphics);
     }
 
     /**
@@ -85,8 +85,8 @@ public abstract class LoadingOverlayMixin {
      * held), but still beneath the title screen buttons that are extracted as part of the screen.
      */
     @Inject(method = "extractRenderState", at = @At("TAIL"))
-    private void titlescreen$extractVideoLayer(GuiGraphicsExtractor graphics, int mouseX, int mouseY,
-                                               float partialTick, CallbackInfo ci) {
-        TitlescreenVideoManager.get().extractVideoLayer(graphics);
+    private void titlescreen$drawIntroVideo(GuiGraphicsExtractor graphics, int mouseX, int mouseY,
+                                            float partialTick, CallbackInfo ci) {
+        TitlescreenVideoManager.get().drawIntroVideo(graphics);
     }
 }

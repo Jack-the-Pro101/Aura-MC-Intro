@@ -86,7 +86,6 @@
   "text.autoconfig.titlescreen.option.loadingBackground.fadeInMs.@Tooltip": "Fade-in duration once the loading screen appears.",
   "text.autoconfig.titlescreen.option.loadingBackground.maxFps": "Max upload FPS",
   "text.autoconfig.titlescreen.option.loadingBackground.maxFps.@Tooltip": "Upper bound for texture uploads per second while the loading screen is up. 0 = unlimited.",
-  "text.autoconfig.titlescreen.option.loadingBackground.maxUploadWidth.@Tooltip": "Largest video dimension uploaded to the GPU (sampled down while copying). 0 = native size.",
   "text.autoconfig.titlescreen.option.loadingBackground.hideVanillaLogo": "Hide vanilla Mojang logo",
   "text.autoconfig.titlescreen.option.loadingBackground.hideVanillaLogo.@Tooltip": "Hide the vanilla MOJANG STUDIOS logo while the background video is showing, so the loading bar sits directly on the video.",
   "text.autoconfig.titlescreen.option.loadingBackground.loop": "Loop instead of freezing",

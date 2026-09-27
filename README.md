@@ -1,8 +1,12 @@
 # Titlescreen
 
 A Fabric mod for Minecraft **26.2** that replaces the vanilla loading/title screen presentation with a
-configurable **transparent video intro**:
+configurable **video intro** - typically one baked clip that covers the whole start-up:
 
+- the video is drawn behind the vanilla loading bar from the moment the window appears,
+- the loading scene **freezes on a configurable frame** of that video (`holdAtMs`) and waits for the game
+  to finish loading, then the intro simply **continues from exactly that frame** - one player, one decoder,
+  no re-open, no stutter,
 - the vanilla progress bar fades away on its own configurable timetable while the **MOJANG logo stays**,
 - the loading overlay is unloaded at a configurable **timestamp in the video**,
 - the video (alpha channel + audio supported) is composited on top of everything,
@@ -133,12 +137,12 @@ Because the whole thing is opaque, nothing here depends on alpha support: it is 
 video (VP8/VP9 WebM, H.264 MP4, whatever VLC can decode).
 
 
-* **Resolution**: the upload is capped by `maxUploadWidth` (video + loading background), and decoding is
-  done in software by default — reliable, but a 4K source then plays at roughly half the configured
-  frame rate (the `debugLogging` report above shows what you actually get). If you have a large *opaque*
-  video and software decoding cannot keep up, `hardwareDecoding` moves the decode to the GPU — but see
-  the warnings in the option table: it drops the alpha channel of VP9 alpha videos and is unreliable
-  when two videos play at once.
+* **Resolution**: frames are kept at the video's native size and handed to libVLC with our own buffer
+  format, so libVLC's scaler (which crashed natively more than once) is never involved. The cost per frame
+  is one copy into the texture plus the GPU upload - the alpha handling for the opaque scenes happens on
+  libVLC's own thread. If a 4K clip is too much for the machine anyway, `videoMaxFps` /
+  `loadingBackground.maxFps` bound how often a frame is uploaded, and `hardwareDecoding` keeps the decode
+  on the GPU.
 * **Audio**: the sound comes from the video itself, so the file has to contain an audio track
   (`ffprobe intro.webm` shows the streams). The mod logs which files have no audio track, and each
   video has its own **volume** option - the loading background defaults to `0`, so raise it (e.g. to
@@ -207,8 +211,7 @@ from the anchor is used after a few seconds so the loading screen still clears.
 | `videoOpacity` | `100` | Extra opacity multiplier on top of the video's alpha. |
 | `videoFit` | `COVER` | `COVER` (crop), `CONTAIN` (letterbox) or `STRETCH`. |
 | `videoMaxFps` | `60` | Upper bound for GPU texture uploads per second, `0` = unlimited. |
-| `maxUploadWidth` | `1920` | Largest uploaded dimension; bigger videos are scaled down by libVLC while decoding (`0` = native). |
-| `hardwareDecoding` | `false` | Decode on the GPU. Unreliable in sandboxed launchers (drops the VP9 alpha plane, a second concurrent video often delivers no frames) - enable only if software decoding cannot keep up. |
+| `hardwareDecoding` | `true` | Decode on the GPU. Leave on: software decoding of 4K cannot keep up (the video stutters and ends after a handful of frames). libVLC falls back to software itself if the driver cannot handle the stream. |
 | `libVlcPath` | `""` | Optional folder containing libvlc; empty = auto-detect. |
 
 ### Timing (relative to the intro video, measured from its first displayed frame)
@@ -244,8 +247,9 @@ from the anchor is used after a few seconds so the loading screen still clears.
 | `loadingBackground.fit` | `COVER` | `COVER`, `CONTAIN` or `STRETCH`. |
 | `loadingBackground.fadeInMs` | `500` | Fade-in once the loading screen appears. |
 | `loadingBackground.maxFps` | `30` | Upload throttle for the background video. |
-| `loadingBackground.maxUploadWidth` | `1920` | Largest uploaded dimension (4K sources are scaled down by libVLC while decoding). |
 | `loadingBackground.hideVanillaLogo` | `true` | Hides the vanilla MOJANG STUDIOS logo while the video is showing. |
+| `loadingBackground.useIntroVideo` | `true` | Use the intro video for the loading screen too - one file with the loading part first and the intro after it. One player, one decoder, no hand-over. Off = use the separate file above. |
+| `loadingBackground.holdAtMs` | `0` | Frame of that video at which the loading scene freezes and waits for the game to finish loading; the intro continues from exactly that frame. `0` plays the whole clip during loading. |
 | `loadingBackground.loop` | `false` | Off = hold the last frame, which leaves a static background for the loading bar. |
 | `loadingBackground.replayOnResourceReload` | `true` | Replays the background on resource reload splashes. |
 | `loadingBackground.waitForVideoToFinish` | `true` | Keeps the loading screen up until the clip has played to the end, so the next scene (intro/title) never starts mid-clip. |
@@ -281,19 +285,29 @@ from the anchor is used after a few seconds so the loading screen still clears.
    sits above the panorama but **beneath the title screen buttons** - so hover highlights, the hand
    cursor and clicks always belong to the buttons.
 
+The title screen is rendered *underneath* the loading overlay, so it draws the same video layer while the
+overlay is still up. That is what covers the panorama and the buttons during the overlay's fade-out - and
+it is also why nothing of the title screen can flash between the overlay disappearing and the intro
+taking over.
+
 
 ## How it works (performance notes)
 
-- libVLC decodes on its own native threads; the game thread only copies the newest frame into a
-  `DynamicTexture` (one upload per displayed frame, throttled by the max-FPS options) and draws it
-  through the vanilla GUI render pipeline, so it composes with the new 26.2 render-state system.
-- Sources bigger than `maxUploadWidth` are scaled down **by libVLC while decoding**, so even a 4K clip
-  is uploaded as 1080p; the frame to GPU path is then a plain copy per row.
-- The loading background is **preloaded during early startup** (first frame decoded, then paused), so it
-  is already on screen the moment the loading screen appears instead of popping in after libVLC has
-  spun up.
+- libVLC decodes on its own native threads; the game thread copies the newest decoded frame straight into
+  the texture's pixels (one copy, one upload per displayed frame, throttled by the max-FPS options) and
+  draws it through the vanilla GUI render pipeline, so it composes with the new 26.2 render-state system.
+- Frames are kept at the video's native size and handed to libVLC with our own buffer format: no scaler
+  inside libVLC (that crashed natively more than once) and no resampling pass in Java.
+- Everything that can be done off the render thread is: an opaque scene's alpha is dropped while libVLC's
+  thread writes the frame, which is where the spare time is. Doing it per pixel on the render thread cost
+  more than the rest of the frame combined at 4K, and that was what made the loading video stutter.
+- The loading scene's video is **preloaded during early startup** (libVLC loaded before the window exists,
+  first frame decoded and then paused), so it is already on screen the moment the loading screen appears.
+- With a baked single video there is exactly one player and one texture for both scenes, so the hand-over
+  allocates, opens and decodes nothing.
 - Frames produced while the render thread is busy are dropped instead of queued.
-- The intro player is created on a background thread *after* loading finished, so startup is never blocked.
+- Nothing is started on the render thread: player creation, teardown and all libVLC control calls happen on
+  background threads (see `VlcVideoPlayer`).
 - If anything goes wrong (missing file, missing libVLC, decode error) the mod disables itself and the
   vanilla loading/title screen is used unchanged.
 
