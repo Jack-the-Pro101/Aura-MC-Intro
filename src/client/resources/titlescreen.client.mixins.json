@@ -4,6 +4,13 @@
   "package": "net.bluegaria.titlescreen.mixin.client",
   "compatibilityLevel": "JAVA_25",
   "client": [
+    "AbstractWidgetMixin",
+    "GuiGraphicsExtractorInvoker",
+    "LoadingOverlayAccessor",
+    "LoadingOverlayMixin",
+    "LogoRendererMixin",
+    "ScreenMixin",
+    "TitleScreenMixin"
   ],
   "injectors": {
     "defaultRequire": 1

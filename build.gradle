@@ -28,11 +28,14 @@ fabricApi {
 }
 
 repositories {
-    // Add repositories to retrieve artifacts from in here.
-    // You should only use this when depending on other mods because
-    // Loom adds the essential maven repositories to download Minecraft and libraries from automatically.
-    // See https://docs.gradle.org/current/userguide/declaring_repositories.html
-    // for more information about repositories.
+    // Modrinth maven - used for Mod Menu, Placeholder API and Cloth Config
+    maven {
+        name = 'Modrinth'
+        url = 'https://api.modrinth.com/maven'
+        content {
+            includeGroup "maven.modrinth"
+        }
+    }
 }
 
 dependencies {
@@ -41,6 +44,30 @@ dependencies {
     implementation "net.fabricmc:fabric-loader:${project.loader_version}"
 
     implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+
+    // MixinExtras is shipped by the loader at runtime; this is only for compile-time annotations.
+    compileOnly "io.github.llamalad7:mixinextras-fabric:0.5.5"
+
+    // Cloth Config - in-game config screen (bundled so users do not have to install it themselves)
+    implementation "maven.modrinth:cloth-config:${project.cloth_config_version}"
+    include "maven.modrinth:cloth-config:${project.cloth_config_version}"
+
+    // Mod Menu - optional integration, deliberately NOT bundled
+    implementation "maven.modrinth:modmenu:${project.modmenu_version}"
+    // Mod Menu requires Placeholder API at runtime; only needed for the dev environment
+    runtimeOnly "maven.modrinth:placeholder-api:${project.placeholder_api_version}"
+
+    // Video playback. vlcj is a JNA binding for libVLC (a system installation of VLC is required).
+    // vlcj-natives holds vlcj's native-discovery support classes and must be bundled as well,
+    // otherwise class loading fails in production (dev classpaths resolve it transitively).
+    implementation "uk.co.caprica:vlcj:${project.vlcj_version}"
+    implementation "uk.co.caprica:vlcj-natives:${project.vlcj_natives_version}"
+    if (project.bundle_video_libraries.toBoolean()) {
+        include "uk.co.caprica:vlcj:${project.vlcj_version}"
+        include "uk.co.caprica:vlcj-natives:${project.vlcj_natives_version}"
+        include "net.java.dev.jna:jna:${project.jna_version}"
+        include "net.java.dev.jna:jna-platform:${project.jna_version}"
+    }
 }
 
 processResources {

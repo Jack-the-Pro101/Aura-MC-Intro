@@ -1,0 +1,21 @@
+package net.bluegaria.titlescreen.mixin.client;
+
+import com.mojang.blaze3d.pipeline.RenderPipeline;
+import com.mojang.blaze3d.textures.GpuSampler;
+import com.mojang.blaze3d.textures.GpuTextureView;
+import net.minecraft.client.gui.GuiGraphicsExtractor;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.gen.Invoker;
+
+/**
+ * Exposes the private {@code innerBlit} overload that accepts an arbitrary GPU texture plus a
+ * tint colour. That is exactly what is needed to draw the video frame with a per-frame alpha.
+ */
+@Mixin(GuiGraphicsExtractor.class)
+public interface GuiGraphicsExtractorInvoker {
+
+    @Invoker("innerBlit")
+    void titlescreen$innerBlit(RenderPipeline pipeline, GpuTextureView textureView, GpuSampler sampler,
+                               int x0, int y0, int x1, int y1,
+                               float u0, float u1, float v0, float v1, int color);
+}

@@ -3,13 +3,18 @@
   "id": "titlescreen",
   "version": "${version}",
   "name": "Titlescreen",
-  "description": "",
-  "authors": [],
+  "description": "Replaces the vanilla loading/title screen presentation with a configurable transparent video intro. The progress bar fades out while the Mojang logo stays, the loading overlay unloads at a configurable point in the video and the title screen buttons fade in at a configurable video timestamp.",
+  "authors": [
+    "bluegaria"
+  ],
   "contact": {},
   "license": "All-Rights-Reserved",
-  "icon": "assets/titlescreen/icon.png",
   "environment": "client",
+  "icon": "assets/titlescreen/icon.png",
   "entrypoints": {
+    "preLaunch": [
+      "net.bluegaria.titlescreen.client.TitlescreenPreLaunch"
+    ],
     "fabric-datagen": [
       "net.bluegaria.titlescreen.client.TitlescreenDataGenerator"
     ],
@@ -18,6 +23,9 @@
     ],
     "main": [
       "net.bluegaria.titlescreen.Titlescreen"
+    ],
+    "modmenu": [
+      "net.bluegaria.titlescreen.client.TitlescreenModMenu"
     ]
   },
   "mixins": [
@@ -30,6 +38,10 @@
   "depends": {
     "fabricloader": ">=${loader_version}",
     "fabric-api": "*",
-    "minecraft": "${minecraft_version}"
+    "minecraft": "${minecraft_version}",
+    "cloth-config": ">=26.2"
+  },
+  "suggests": {
+    "modmenu": ">=20.0.0"
   }
 }
