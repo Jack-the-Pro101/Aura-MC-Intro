@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "id": "titlescreen",
+  "version": "${version}",
+  "name": "Titlescreen",
+  "description": "",
+  "authors": [],
+  "contact": {},
+  "license": "All-Rights-Reserved",
+  "icon": "assets/titlescreen/icon.png",
+  "environment": "client",
+  "entrypoints": {
+    "fabric-datagen": [
+      "net.bluegaria.titlescreen.client.TitlescreenDataGenerator"
+    ],
+    "client": [
+      "net.bluegaria.titlescreen.client.TitlescreenClient"
+    ],
+    "main": [
+      "net.bluegaria.titlescreen.Titlescreen"
+    ]
+  },
+  "mixins": [
+    "titlescreen.mixins.json",
+    {
+      "config": "titlescreen.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "fabric-api": "*",
+    "minecraft": "${minecraft_version}"
+  }
+}
