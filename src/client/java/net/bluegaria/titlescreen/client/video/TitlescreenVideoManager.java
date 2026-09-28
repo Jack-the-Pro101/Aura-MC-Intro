@@ -493,10 +493,10 @@ public final class TitlescreenVideoManager {
             this.backgroundPlayer.resumeFromPreload();
             // The volume was forced to 0 for the silent preload - apply the configured one now that
             // the video is actually on screen.
-            this.backgroundPlayer.setVolume(cfg.loadingBackground.volume);
+            this.backgroundPlayer.setVolume(loadingVolume(cfg));
             if (usesSeparateAudioPlayer(cfg)) {
                 this.audioPlayer.resumeFromPreload();
-                this.audioPlayer.setVolume(cfg.loadingBackground.volume);
+                this.audioPlayer.setVolume(loadingVolume(cfg));
                 this.audioPlayer.setAudioDelayMs(cfg.video.audioDelayMs);
                 if (cfg.video.audioDelayMs != 0 && cfg.general.debugLogging) {
                     LOGGER.info("Shifting the sound by {} ms to line it up with the picture",
@@ -530,9 +530,9 @@ public final class TitlescreenVideoManager {
         Thread thread = new Thread(() -> {
             this.backgroundPlayer.setDebugLogging(cfg.general.debugLogging);
             this.backgroundPlayer.setHardwareDecoding(cfg.video.hardwareDecoding && !this.forceSoftwareDecoding);
-            boolean ok = this.backgroundPlayer.start(path, cfg.loadingBackground.volume, cfg.video.libVlcPath);
+            boolean ok = this.backgroundPlayer.start(path, loadingVolume(cfg), cfg.video.libVlcPath);
             if (ok && usesSeparateAudioPlayer(cfg)) {
-                this.audioPlayer.start(path, cfg.loadingBackground.volume, cfg.video.libVlcPath);
+                this.audioPlayer.start(path, loadingVolume(cfg), cfg.video.libVlcPath);
             }
             if (this.backgroundGeneration != generation) {
                 this.backgroundPlayer.close();
@@ -1063,6 +1063,16 @@ public final class TitlescreenVideoManager {
      * the two players are drifting apart. A freeze that leaves no other trace at all is otherwise
      * impossible to tell apart from a log that simply ended.</p>
      */
+    /**
+     * Volume for the loading scene. With a baked video that scene plays the beginning of the intro, so the
+     * intro's volume applies - it is one continuous soundtrack, and using the loading background's own
+     * (muted by default) volume meant the first half of the clip had no sound at all. The separate loading
+     * clip keeps its own volume.
+     */
+    private static int loadingVolume(TitlescreenConfig cfg) {
+        return isBakedVideo(cfg) ? cfg.video.videoVolume : cfg.loadingBackground.volume;
+    }
+
     /** True when a baked video's sound is played by its own player rather than by the video player. */
     private static boolean usesSeparateAudioPlayer(TitlescreenConfig cfg) {
         return isBakedVideo(cfg) && !cfg.video.audioInSamePlayer;
@@ -1292,19 +1302,37 @@ public final class TitlescreenVideoManager {
      */
     public float titleTextAlphaFactor() {
         TitlescreenConfig cfg = TitlescreenConfigHolder.get();
+        return timelineFadeFactor(cfg.timing.textFadeInAtMs, cfg.timing.textFadeInDurationMs);
+    }
+
+    /**
+     * Fade factor on the video's own timeline, or {@code -1} while vanilla is in charge. The buttons and the
+     * texts differ only in the timings they pass in here.
+     */
+    private float timelineFadeFactor(int startMs, int durationMs) {
+        TitlescreenConfig cfg = TitlescreenConfigHolder.get();
         if (!cfg.general.enabled || !cfg.overrideButtonFade() || !holdingEligible() || this.ended) {
             return -1.0F;
         }
         long time = videoTimeMs();
-        int start = cfg.timing.textFadeInAtMs;
-        if (time < start) {
+        if (time < startMs) {
             return 0.0F;
         }
-        int duration = cfg.timing.textFadeInDurationMs;
-        if (duration <= 0) {
+        if (durationMs <= 0) {
             return 1.0F;
         }
-        return Mth.clamp((time - start) / (float) duration, 0.0F, 1.0F);
+        return Mth.clamp((time - startMs) / (float) durationMs, 0.0F, 1.0F);
+    }
+
+    /**
+     * Fade factor from a wall-clock timestamp, for the fades whose start is an event rather than a video
+     * time (the wordmark after the video, a badge that appears late).
+     */
+    private static float fadeSince(long startMs, int durationMs) {
+        if (durationMs <= 0 || startMs == 0L) {
+            return 1.0F;
+        }
+        return Mth.clamp((Util.getMillis() - startMs) / (float) durationMs, 0.0F, 1.0F);
     }
 
     /**
@@ -1354,15 +1382,11 @@ public final class TitlescreenVideoManager {
         if (this.badgeFirstSeenMs == 0L) {
             this.badgeFirstSeenMs = Util.getMillis();
         }
-        int duration = cfg.timing.buttonsFadeInDurationMs;
-        if (duration <= 0) {
-            return 1.0F;
-        }
         // Badges fade on the buttons' timetable - so a longer button fade-in moves them along - but never
         // before they can actually be seen.
         long from = Math.max(this.badgeFirstSeenMs, this.anchorSetMs);
         from = Math.max(from, this.t0Ms + cfg.timing.buttonsFadeInAtMs);
-        return Mth.clamp((Util.getMillis() - from) / (float) duration, 0.0F, 1.0F);
+        return fadeSince(from, cfg.timing.buttonsFadeInDurationMs);
     }
 
     /**
@@ -1397,28 +1421,12 @@ public final class TitlescreenVideoManager {
             // No video ran, so there is nothing to wait for.
             return vanillaAlpha;
         }
-        int duration = cfg.timing.textFadeInDurationMs;
-        if (duration <= 0) {
-            return vanillaAlpha;
-        }
-        return vanillaAlpha * Mth.clamp((Util.getMillis() - this.logoFadeStartMs) / (float) duration, 0.0F, 1.0F);
+        return vanillaAlpha * fadeSince(this.logoFadeStartMs, cfg.timing.textFadeInDurationMs);
     }
 
     public float buttonAlphaOverride() {
         TitlescreenConfig cfg = TitlescreenConfigHolder.get();
-        if (!cfg.general.enabled || !cfg.overrideButtonFade() || !holdingEligible() || this.ended) {
-            return -1.0F;
-        }
-        long time = videoTimeMs();
-        int start = cfg.timing.buttonsFadeInAtMs;
-        if (time < start) {
-            return 0.0F;
-        }
-        int duration = cfg.timing.buttonsFadeInDurationMs;
-        if (duration <= 0) {
-            return 1.0F;
-        }
-        return Mth.clamp((time - start) / (float) duration, 0.0F, 1.0F);
+        return timelineFadeFactor(cfg.timing.buttonsFadeInAtMs, cfg.timing.buttonsFadeInDurationMs);
     }
 
     /** Overall video opacity including fade in/out and the configured opacity multiplier. */

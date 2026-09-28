@@ -85,7 +85,7 @@
   "text.autoconfig.titlescreen.option.loadingBackground.useBundledDefaultVideo": "Use bundled default video",
   "text.autoconfig.titlescreen.option.loadingBackground.useBundledDefaultVideo.@Tooltip": "Play the loading screen clip bundled with the mod when the configured file is missing. Only used when \"reuse the intro video\" is off.",
   "text.autoconfig.titlescreen.option.loadingBackground.volume": "Volume (%)",
-  "text.autoconfig.titlescreen.option.loadingBackground.volume.@Tooltip": "Volume of this video's audio. Muted by default so it does not clash with the intro video.",
+  "text.autoconfig.titlescreen.option.loadingBackground.volume.@Tooltip": "Volume of this video's audio, 0-100. Only used when \"reuse the intro video\" is off - with a baked video the loading scene plays part of the intro, so the intro's volume applies to the whole clip.",
   "text.autoconfig.titlescreen.option.loadingBackground.opacity": "Opacity (%)",
   "text.autoconfig.titlescreen.option.loadingBackground.opacity.@Tooltip": "Opacity multiplier on top of the video's alpha channel.",
   "text.autoconfig.titlescreen.option.loadingBackground.fit": "Fit mode",

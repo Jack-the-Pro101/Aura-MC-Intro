@@ -304,7 +304,10 @@ public class TitlescreenConfig implements ConfigData {
         @ConfigEntry.Gui.Tooltip
         public boolean useBundledDefaultVideo = true;
 
-        /** Volume for this video, 0-100. Muted by default so it does not clash with the intro. */
+        /**
+         * Volume for this video, 0-100. Only used when "reuse the intro video" below is off: with a baked
+         * video the loading scene plays part of the intro, so the intro's volume applies to the whole clip.
+         */
         @ConfigEntry.Gui.Tooltip
         @ConfigEntry.BoundedDiscrete(min = 0, max = 100)
         public int volume = 0;

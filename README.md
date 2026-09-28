@@ -253,7 +253,7 @@ from the anchor is used after a few seconds so the loading screen still clears.
 | `loadingBackground.enabled` | `true` | Play a video behind the vanilla loading bar instead of the plain red background. |
 | `loadingBackground.videoPath` | `config/titlescreen/loading_background.webm` | Loading background video. Only used when "reuse the intro video" is off. |
 | `loadingBackground.useBundledDefaultVideo` | `true` | Play the loading clip bundled with the mod (`assets/titlescreen/video/mojang_studios.webm`) when the configured file is missing. Only used when "reuse the intro video" is off. |
-| `loadingBackground.volume` | `0` | Audio volume (muted by default). |
+| `loadingBackground.volume` | `0` | Audio volume (muted by default). Only used when "reuse the intro video" is off — with a baked video the loading scene plays part of the intro, so the intro's own volume applies to the whole clip. |
 | `loadingBackground.opacity` | `100` | Opacity multiplier. |
 | `loadingBackground.fit` | `COVER` | `COVER`, `CONTAIN` or `STRETCH`. |
 | `loadingBackground.fadeInMs` | `500` | Fade-in once the loading screen appears. |

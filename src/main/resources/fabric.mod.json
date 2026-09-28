@@ -3,33 +3,26 @@
   "id": "titlescreen",
   "version": "${version}",
   "name": "Titlescreen",
-  "description": "Replaces the vanilla loading/title screen presentation with a configurable transparent video intro. The progress bar fades out while the Mojang logo stays, the loading overlay unloads at a configurable point in the video and the title screen buttons fade in at a configurable video timestamp.",
+  "description": "Replaces the vanilla loading/title screen presentation with a configurable video intro. One baked clip can cover the whole start-up: it plays behind the loading bar, freezes on a chosen frame while the game finishes loading, then continues as the intro while the progress bar, the buttons and the title screen texts fade in on their own timestamps.",
   "authors": [
     "bluegaria"
   ],
   "contact": {},
-  "license": "All-Rights-Reserved",
+  "license": "GPL-3.0-only",
   "environment": "client",
   "icon": "assets/titlescreen/icon.png",
   "entrypoints": {
     "preLaunch": [
       "net.bluegaria.titlescreen.client.TitlescreenPreLaunch"
     ],
-    "fabric-datagen": [
-      "net.bluegaria.titlescreen.client.TitlescreenDataGenerator"
-    ],
     "client": [
       "net.bluegaria.titlescreen.client.TitlescreenClient"
-    ],
-    "main": [
-      "net.bluegaria.titlescreen.Titlescreen"
     ],
     "modmenu": [
       "net.bluegaria.titlescreen.client.TitlescreenModMenu"
     ]
   },
   "mixins": [
-    "titlescreen.mixins.json",
     {
       "config": "titlescreen.client.mixins.json",
       "environment": "client"
