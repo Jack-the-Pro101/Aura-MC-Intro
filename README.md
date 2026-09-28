@@ -17,7 +17,8 @@ configurable **video intro** - typically one baked clip that covers the whole st
   finished, so vanilla pops it in),
 - the buttons get their own **vertical offset** and their own **GUI scale**, independent of the rest of the UI,
 - when the video ends it can **loop a region**, **fade back to the vanilla panorama** or **freeze** on the last frame,
-- the vanilla "MINECRAFT" wordmark is hidden by default (configurable).
+- the vanilla "MINECRAFT" wordmark can stay hidden while the video plays and **starts fading in the moment the
+  video ends** (`fadeInAfterVideo`, on by default), so it cross-dissolves with the video's fade-out,
 
 Everything is configurable in-game through **Mod Menu → Config** (Cloth Config screen included in the jar).
 
@@ -107,9 +108,11 @@ Everything is configurable in-game through **Mod Menu → Config** (Cloth Config
    `vlc/plugins` subfolder is picked up automatically via `VLC_PLUGIN_PATH`).
 
 3. A video file, by default `config/titlescreen/intro.webm` inside your game directory.
-   **You don't have to provide one**: the mod ships a transparent WebM placeholder (with audio) and copies
-   it to that path automatically the first time, so you can just replace the file afterwards
-   (`useBundledDefaultVideo` in the config turns this off).
+   **You don't have to provide one**: the mod ships its video inside the jar and plays that whenever the
+   configured path is empty or has no file at it - so it works out of the box, and dropping your own clip at
+   that path overrides the bundled one (`useBundledDefaultVideo` in the config turns the fallback off).
+   The bundled clip is unpacked next to the config (`config/titlescreen/bundled/`) because libVLC needs a
+   real file to open.
 
 ## Recommended video format
 
@@ -201,11 +204,11 @@ from the anchor is used after a few seconds so the loading screen still clears.
 | Option | Default | Description |
 | --- | --- | --- |
 | `enabled` | `true` | Master switch - disables every behaviour of the mod when off. |
-| `hideMinecraftLogo` | `true` | Hides the "MINECRAFT" wordmark above the title screen buttons. |
+| `fadeInAfterVideo` | `true` | Keep the "MINECRAFT" wordmark hidden while the video plays, and start fading it in the moment the video ends - so it cross-dissolves with the video's own fade-out. Off leaves the wordmark exactly as vanilla draws it. |
 | `hideSplashText` | `false` | Hides the rotating yellow splash text. |
 | `debugLogging` | `false` | Logs the intro state machine (useful while tuning timings). |
 | `replayOnResourceReload` | `false` | Replays the intro on resource reloads (F3+T, resource pack changes). |
-| `useBundledDefaultVideo` | `true` | If the configured video file is missing, the transparent placeholder clip bundled with the mod is copied to that path and played. |
+| `useBundledDefaultVideo` | `true` | Play the video bundled inside the mod when the configured file is missing - the video works with no setup, and a file at that path overrides the bundled one. |
 
 ### Video
 | Option | Default | Description |
@@ -224,7 +227,7 @@ from the anchor is used after a few seconds so the loading screen still clears.
 | Option | Default | Description |
 | --- | --- | --- |
 | `videoStartDelayMs` | `0` | Delay between finishing loading and the first video frame. |
-| `videoFadeInMs` | `400` | Video fade-in duration. |
+| `videoFadeInMs` | `400` | Video fade-in duration. Only used when the loading screen does not reuse the intro video. |
 | `progressBarFadeStartMs` | `200` | Video timestamp at which the progress bar starts fading. |
 | `progressBarFadeDurationMs` | `800` | How long the progress bar takes to disappear. |
 | `overlayUnloadAtMs` | `1400` | Video timestamp at which the loading overlay (MOJANG logo) is unloaded. `0` = vanilla transition. |
@@ -232,7 +235,7 @@ from the anchor is used after a few seconds so the loading screen still clears.
 | `buttonsFadeInAtMs` | `900` | Video timestamp at which the buttons start fading in. |
 | `buttonsFadeInDurationMs` | `1000` | How long the buttons take to fade in. |
 | `textFadeInAtMs` | `900` | Video timestamp at which the version/mod-count line and the splash text start fading in (fully transparent before it). The Realms badge fades in from the moment it appears instead. |
-| `textFadeInDurationMs` | `1000` | How long those texts take to fade in (also the Realms badge's fade). |
+| `textFadeInDurationMs` | `1000` | How long those texts take to fade in (also the Realms badge's fade, and the wordmark's fade after the video). Set it equal to `videoFadeOutMs` for a symmetric cross-dissolve. |
 | `videoFadeOutMs` | `1200` | Fade used by `FADE_OUT_TO_PANORAMA`. |
 | `endBehaviour` | `FADE_OUT_TO_PANORAMA` | `LOOP_REGION`, `FADE_OUT_TO_PANORAMA` or `FREEZE_LAST_FRAME`. |
 | `loopStartMs` / `loopEndMs` | `0` / `0` | Loop region for `LOOP_REGION`; `loopEndMs = 0` means end of video. |
@@ -248,8 +251,8 @@ from the anchor is used after a few seconds so the loading screen still clears.
 | Option | Default | Description |
 | --- | --- | --- |
 | `loadingBackground.enabled` | `true` | Play a video behind the vanilla loading bar instead of the plain red background. |
-| `loadingBackground.videoPath` | `config/titlescreen/mojang_studios.webm` | Loading background video. |
-| `loadingBackground.useBundledDefaultVideo` | `true` | Copy the bundled clip (`assets/titlescreen/video/mojang_studios.webm`) there if missing. |
+| `loadingBackground.videoPath` | `config/titlescreen/loading_background.webm` | Loading background video. Only used when "reuse the intro video" is off. |
+| `loadingBackground.useBundledDefaultVideo` | `true` | Play the loading clip bundled with the mod (`assets/titlescreen/video/mojang_studios.webm`) when the configured file is missing. Only used when "reuse the intro video" is off. |
 | `loadingBackground.volume` | `0` | Audio volume (muted by default). |
 | `loadingBackground.opacity` | `100` | Opacity multiplier. |
 | `loadingBackground.fit` | `COVER` | `COVER`, `CONTAIN` or `STRETCH`. |

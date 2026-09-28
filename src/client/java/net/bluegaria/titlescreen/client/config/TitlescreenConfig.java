@@ -64,9 +64,12 @@ public class TitlescreenConfig implements ConfigData {
         @ConfigEntry.Gui.Tooltip
         public boolean enabled = true;
 
-        /** Hides the "MINECRAFT" wordmark normally drawn above the title screen buttons. */
+        /**
+         * Keep the "MINECRAFT" wordmark above the title screen buttons hidden while the video plays, and fade
+         * it in once the video has ended. Off leaves the wordmark exactly as vanilla draws it.
+         */
         @ConfigEntry.Gui.Tooltip
-        public boolean hideMinecraftLogo = true;
+        public boolean fadeInAfterVideo = true;
 
         /** Hides the rotating yellow splash text as well. */
         @ConfigEntry.Gui.Tooltip
@@ -85,8 +88,8 @@ public class TitlescreenConfig implements ConfigData {
         public boolean replayOnResourceReload = false;
 
         /**
-         * When the configured video file does not exist, extract the video bundled with the mod
-         * (a transparent placeholder clip) to that path and use it instead of doing nothing.
+         * Play the video that ships inside the jar when the configured file is not there - so the mod works
+         * with no setup at all, and a file at the configured path takes over whenever there is one.
          */
         @ConfigEntry.Gui.Tooltip
         public boolean useBundledDefaultVideo = true;
@@ -94,8 +97,9 @@ public class TitlescreenConfig implements ConfigData {
 
     public static class Video {
         /**
-         * Path to the intro video, relative to the Minecraft game directory (or an absolute path).
-         * .webm with VP8/VP9 alpha plus an audio track is recommended for transparency + sound.
+         * Path to the intro video, relative to the Minecraft game directory (or an absolute path). When a
+         * file is there it is used; otherwise the mod's own bundled video plays. .webm with VP8/VP9 alpha
+         * plus an audio track is recommended for transparency + sound.
          */
         @ConfigEntry.Gui.Tooltip
         public String videoPath = "config/titlescreen/intro.webm";
@@ -164,7 +168,11 @@ public class TitlescreenConfig implements ConfigData {
         @ConfigEntry.BoundedDiscrete(min = 0, max = 20000)
         public int videoStartDelayMs = 0;
 
-        /** How long the video takes to fade in once it starts, in milliseconds. */
+        /**
+         * How long the video takes to fade in once it starts, in milliseconds. Only used when the loading
+         * screen does <em>not</em> reuse the intro video (a baked video is already on screen and just keeps
+         * playing, so fading it in again would blink the loading screen through).
+         */
         @ConfigEntry.Gui.Tooltip
         @ConfigEntry.BoundedDiscrete(min = 0, max = 20000)
         public int videoFadeInMs = 400;
@@ -280,16 +288,18 @@ public class TitlescreenConfig implements ConfigData {
         public boolean enabled = true;
 
         /**
-         * Path to the loading background video, relative to the game directory (or absolute).
-         * A copy of the Minecraft Dungeons loading screen clip is bundled with the mod and is
-         * copied here automatically when the file is missing.
+         * Path to the loading background video, relative to the game directory (or absolute). When a file
+         * is there it is used; otherwise the loading clip bundled with the mod plays.
+         *
+         * <p>Only used when "reuse the intro video" below is off: with one baked video the loading scene
+         * plays the beginning of that same file.</p>
          */
         @ConfigEntry.Gui.Tooltip
-        public String videoPath = "config/titlescreen/mojang_studios.webm";
+        public String videoPath = "config/titlescreen/loading_background.webm";
 
         /**
-         * When the configured file does not exist, extract the loading screen clip bundled with the
-         * mod (assets/titlescreen/video/mojang_studios.webm) to that path and use it.
+         * Play the loading screen clip bundled with the mod when the configured file is not there. Only used
+         * when "reuse the intro video" below is off.
          */
         @ConfigEntry.Gui.Tooltip
         public boolean useBundledDefaultVideo = true;

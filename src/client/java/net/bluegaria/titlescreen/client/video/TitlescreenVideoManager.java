@@ -19,7 +19,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.Optional;
@@ -109,6 +108,8 @@ public final class TitlescreenVideoManager {
     private volatile boolean broken;
     /** When a badge widget first appeared, so it can fade in from that moment (see titleBadgeAlpha). */
     private long badgeFirstSeenMs;
+    /** When the last video session ended, which is when the wordmark starts fading in. */
+    private long logoFadeStartMs;
     private long loadingFpsBaseline = -1L;
     private long loadingFpsBaselineMs;
     private long lastIntroFrameCount = -1L;
@@ -425,12 +426,8 @@ public final class TitlescreenVideoManager {
         if (!cfg.general.enabled || !cfg.loadingBackground.enabled || this.backgroundPlayedOnce) {
             return;
         }
-        Path path = cfg.resolveLoadingBackgroundPath();
+        Path path = VideoAssets.resolveLoadingBackground(cfg);
         if (path == null) {
-            return;
-        }
-        if (!Files.isRegularFile(path) && !VideoAssets.ensureLoadingBackground(cfg, path)) {
-            LOGGER.info("No loading background video available - the vanilla loading screen is used");
             return;
         }
         // The loading scene is a background: dropping its alpha happens on libVLC's thread, which
@@ -516,15 +513,9 @@ public final class TitlescreenVideoManager {
         if (this.backgroundPlayedOnce && !cfg.loadingBackground.replayOnResourceReload) {
             return;
         }
-        Path path = cfg.resolveLoadingBackgroundPath();
+        Path path = VideoAssets.resolveLoadingBackground(cfg);
         if (path == null) {
-            LOGGER.warn("No loading background video configured - keeping the vanilla loading screen");
-            this.backgroundFailed = true;
-            return;
-        }
-        if (!Files.isRegularFile(path) && !VideoAssets.ensureLoadingBackground(cfg, path)) {
-            LOGGER.warn("Loading background video '{}' was not found - keeping the vanilla loading screen",
-                    cfg.loadingBackground.videoPath);
+            LOGGER.warn("No loading background video available - keeping the vanilla loading screen");
             this.backgroundFailed = true;
             return;
         }
@@ -790,14 +781,9 @@ public final class TitlescreenVideoManager {
 
     /** Starts libVLC on a background thread so the first real frame never blocks loading. */
     private boolean beginSession(TitlescreenConfig cfg) {
-        Path path = cfg.resolveVideoPath();
+        Path path = VideoAssets.resolveIntro(cfg);
         if (path == null) {
-            LOGGER.warn("No video path configured - skipping the video intro (vanilla behaviour is kept)");
-            return false;
-        }
-        if (!Files.isRegularFile(path) && !VideoAssets.ensureIntro(cfg, path)) {
-            LOGGER.warn("Video file '{}' was not found - skipping the video intro (vanilla behaviour is kept)",
-                    cfg.video.videoPath);
+            LOGGER.warn("No video available - skipping the video intro (vanilla behaviour is kept)");
             return false;
         }
         this.startRequested = true;
@@ -866,6 +852,10 @@ public final class TitlescreenVideoManager {
                 case FADE_OUT_TO_PANORAMA -> {
                     if (this.introEnded() && this.endFadeStartMs < 0L) {
                         this.endFadeStartMs = Util.getMillis();
+                        // The wordmark fades in from here as well, so the video dissolving away and the
+                        // wordmark appearing are one movement. Set the fade durations to match (videoFadeOutMs
+                        // and textFadeInDurationMs) for a perfectly symmetric cross-fade.
+                        this.logoFadeStartMs = this.endFadeStartMs;
                         if (cfg.general.debugLogging) {
                             long playedMs = Math.max(1L, Util.getMillis() - this.introStartMs);
                             LOGGER.info("Video ended after {} frames in {} ms ({} fps) - fading out over {} ms",
@@ -877,6 +867,8 @@ public final class TitlescreenVideoManager {
                 case FREEZE_LAST_FRAME -> {
                     if (this.introEnded() && !this.frozen) {
                         this.frozen = true;
+                        // Nothing is fading out here, so this is simply when the wordmark starts appearing.
+                        this.logoFadeStartMs = Util.getMillis();
                         this.player.setPaused(true);
                         if (cfg.general.debugLogging) {
                             LOGGER.info("Video ended - freezing on the last frame");
@@ -1341,13 +1333,19 @@ public final class TitlescreenVideoManager {
      */
     public float titleBadgeAlpha(boolean present) {
         TitlescreenConfig cfg = TitlescreenConfigHolder.get();
-        if (!cfg.general.enabled || !cfg.overrideButtonFade() || this.ended) {
+        if (!cfg.general.enabled || !cfg.overrideButtonFade()) {
             return 1.0F;
         }
-        if (!holdingEligible()) {
-            // Before the hand-over the badge is hidden behind the opaque loading overlay - it must not be
-            // visible already, or it appears the instant the overlay goes away.
+        if (!this.anchorSet && !this.introPlayedOnce) {
+            // Waiting for the hand-over: the badge must not show through the loading overlay's fade, and it
+            // starts its own fade from the moment the title screen appears.
             return 0.0F;
+        }
+        if (this.failed || this.ended) {
+            // The intro is over (or never started): the badge is an ordinary badge again. Without this the
+            // badge disappeared for good once the video ended, because tearing the session down clears the
+            // anchor that the fade is measured from.
+            return 1.0F;
         }
         if (!present) {
             this.badgeFirstSeenMs = 0L;
@@ -1374,6 +1372,36 @@ public final class TitlescreenVideoManager {
     public float scaleSplashAlpha(float vanillaAlpha) {
         float factor = titleTextAlphaFactor();
         return factor < 0.0F ? vanillaAlpha : vanillaAlpha * factor;
+    }
+
+    /**
+     * Alpha for the "MINECRAFT" wordmark with {@code general.fadeInAfterVideo}: nothing while the video is on
+     * screen, then a fade-in from the moment the video ended. Without that option, or when no video ran at
+     * all, the wordmark is left exactly as vanilla draws it.
+     */
+    public float scaleLogoAlpha(float vanillaAlpha) {
+        TitlescreenConfig cfg = TitlescreenConfigHolder.get();
+        if (!cfg.general.enabled || !cfg.general.fadeInAfterVideo || this.failed) {
+            return vanillaAlpha;
+        }
+        if (!this.anchorSet && !this.introPlayedOnce) {
+            // Waiting for the hand-over.
+            return 0.0F;
+        }
+        if (this.sessionActive && this.endFadeStartMs < 0L && !this.frozen) {
+            // Still playing normally. Once it ends - the fade-out starting, or the freeze frame - the
+            // wordmark fades in alongside, which is the whole point of this option.
+            return 0.0F;
+        }
+        if (this.logoFadeStartMs == 0L) {
+            // No video ran, so there is nothing to wait for.
+            return vanillaAlpha;
+        }
+        int duration = cfg.timing.textFadeInDurationMs;
+        if (duration <= 0) {
+            return vanillaAlpha;
+        }
+        return vanillaAlpha * Mth.clamp((Util.getMillis() - this.logoFadeStartMs) / (float) duration, 0.0F, 1.0F);
     }
 
     public float buttonAlphaOverride() {
@@ -1415,16 +1443,6 @@ public final class TitlescreenVideoManager {
         }
         alpha *= cfg.video.videoOpacity / 100.0F;
         return Mth.clamp(alpha, 0.0F, 1.0F);
-    }
-
-    /**
-     * Whether the "MINECRAFT" wordmark should be hidden. Independent of the video: the config
-     * option applies to the title screen on its own.
-     */
-    public boolean shouldHideMinecraftLogo() {
-        TitlescreenConfig cfg = TitlescreenConfigHolder.get();
-        return cfg.general.enabled && cfg.general.hideMinecraftLogo
-                && Minecraft.getInstance().gui.screen() instanceof TitleScreen;
     }
 
     /** True while the loading background video covers the vanilla loading screen. */
