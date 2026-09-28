@@ -1,5 +1,8 @@
 package net.bluegaria.titlescreen.client.video;
 
+import com.mojang.blaze3d.systems.RenderSystem;
+import com.mojang.blaze3d.textures.FilterMode;
+import com.mojang.blaze3d.textures.GpuSampler;
 import net.bluegaria.titlescreen.client.config.TitlescreenConfig;
 import net.bluegaria.titlescreen.mixin.client.GuiGraphicsExtractorInvoker;
 import net.minecraft.client.Minecraft;
@@ -141,11 +144,25 @@ public final class VideoTextureLayer {
         ((GuiGraphicsExtractorInvoker) graphics).titlescreen$innerBlit(
                 RenderPipelines.GUI_TEXTURED,
                 target.getTextureView(),
-                target.getSampler(),
+                videoSampler(),
                 Math.round(rect[0]), Math.round(rect[1]), Math.round(rect[2]), Math.round(rect[3]),
                 rect[4], rect[5], rect[6], rect[7],
                 ARGB.white(alpha));
         return true;
+    }
+
+    /**
+     * The sampler the video is drawn with.
+     *
+     * <p>Minecraft creates a texture like this with a {@code NEAREST}/{@code REPEAT} sampler - nearest for
+     * both magnification and minification - so the GPU point-samples the video at whatever scale it ends up
+     * being drawn at. A 4K clip on a 1440p screen then shows every texel as a block, and a 1080p clip on a
+     * 4K screen shows each pixel as a 2x2 square, while a video player scales it with a real filter. Linear
+     * filtering is exact for the 1:1 case, so it only ever helps; {@code CLAMP_TO_EDGE} also removes the
+     * wrapped edge pixel that {@code REPEAT} showed along the right and bottom edges.</p>
+     */
+    private static GpuSampler videoSampler() {
+        return RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR);
     }
 
     public void release(TextureManager textureManager) {

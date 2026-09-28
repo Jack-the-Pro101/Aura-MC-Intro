@@ -9,6 +9,7 @@
     "LoadingOverlayAccessor",
     "LoadingOverlayMixin",
     "LogoRendererMixin",
+    "RealmsNotificationsScreenMixin",
     "ScreenMixin",
     "TitleScreenMixin"
   ],

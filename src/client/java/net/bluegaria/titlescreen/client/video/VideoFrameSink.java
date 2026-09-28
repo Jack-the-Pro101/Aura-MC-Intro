@@ -3,6 +3,8 @@ package net.bluegaria.titlescreen.client.video;
 import com.mojang.blaze3d.platform.NativeImage;
 import net.minecraft.client.renderer.texture.DynamicTexture;
 import org.lwjgl.system.MemoryUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
 
@@ -21,6 +23,7 @@ import java.nio.ByteBuffer;
  */
 public final class VideoFrameSink {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger("Titlescreen/Video");
     private static final int BYTES_PER_PIXEL = 4;
 
     private final Object lock = new Object();
@@ -33,6 +36,14 @@ public final class VideoFrameSink {
 
     /** Read by the producer thread, set once by the scene that owns this player. */
     private volatile boolean forceOpaque;
+
+    /**
+     * How many frames are scanned for real transparency before the alpha pass is dropped. An opaque video
+     * does not need it, and at 4K that pass costs more than everything else the producer does per frame.
+     */
+    private static final int ALPHA_PROBE_FRAMES = 5;
+    private int alphaProbeFrames = ALPHA_PROBE_FRAMES;
+    private boolean alphaPresent;
 
     private long producedFrames;
     private long lastUploadNanos;
@@ -89,7 +100,20 @@ public final class VideoFrameSink {
             if (bgrFallback) {
                 swizzleBgrToRgba(target, frameWidth * frameHeight);
             } else if (this.forceOpaque) {
-                forceOpaqueAlpha(target, frameWidth * frameHeight);
+                if (this.alphaProbeFrames > 0 && !this.alphaPresent) {
+                    this.alphaPresent = hasAlpha(target, frameWidth * frameHeight);
+                    if (!this.alphaPresent && --this.alphaProbeFrames == 0) {
+                        // Five frames without a single transparent pixel: this video has no transparency to
+                        // drop, so stop rewriting the alpha channel of every frame - at 4K that pass alone
+                        // starves libVLC's output thread, which in turn stalls the decoder and the audio
+                        // with it.
+                        this.forceOpaque = false;
+                        LOGGER.info("Video has no transparency - skipping the alpha pass from now on");
+                    }
+                }
+                if (this.forceOpaque) {
+                    forceOpaqueAlpha(target, frameWidth * frameHeight);
+                }
             }
 
             // Publish the freshly written buffer and keep the other one for the next write.
@@ -234,5 +258,17 @@ public final class VideoFrameSink {
             long address = base + (long) i * 4L;
             MemoryUtil.memPutInt(address, MemoryUtil.memGetInt(address) | 0xFF000000);
         }
+    }
+
+    /** Whether any pixel of the frame is not fully opaque. */
+    private static boolean hasAlpha(ByteBuffer buffer, int pixelCount) {
+        long base = MemoryUtil.memAddress(buffer);
+        long end = base + (long) pixelCount * BYTES_PER_PIXEL;
+        for (long address = base + 3L; address < end; address += 4L) {
+            if (MemoryUtil.memGetByte(address) != (byte) 0xFF) {
+                return true;
+            }
+        }
+        return false;
     }
 }

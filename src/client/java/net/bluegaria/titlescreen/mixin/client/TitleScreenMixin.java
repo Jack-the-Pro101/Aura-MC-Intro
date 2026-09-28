@@ -1,5 +1,8 @@
 package net.bluegaria.titlescreen.mixin.client;
 
+import com.llamalad7.mixinextras.injector.ModifyExpressionValue;
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import net.bluegaria.titlescreen.client.video.TitlescreenVideoManager;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.Font;
@@ -12,13 +15,13 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.gen.Accessor;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
-import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
  * Title screen integration:
  * <ul>
  *   <li>replaces vanilla's fixed two second button fade with the configured video timestamps,</li>
+ *   <li>fades the version/mod-count line, the splash text and the Realms badge on their own timetable,</li>
  *   <li>applies the configured vertical offset to the buttons after {@code init()},</li>
  *   <li>optionally hides the splash text.</li>
  * </ul>
@@ -46,6 +49,7 @@ public abstract class TitleScreenMixin {
                 widget.setAlpha(alpha);
             }
         }
+
     }
 
     @Inject(method = "init", at = @At("TAIL"))
@@ -71,14 +75,36 @@ public abstract class TitleScreenMixin {
         TitlescreenVideoManager.get().drawTitleScreenVideo(graphics);
     }
 
-    @Redirect(
+    /**
+     * The version/mod-count line at the bottom left is drawn with {@code ARGB.white(fade)}, where the fade
+     * is vanilla's own screen fade. Scaling that alpha is what makes it start transparent and fade in on
+     * the configured timetable like the buttons - by the time the video hands the screen over, vanilla's
+     * fade is already finished, so it was always fully visible.
+     */
+    @ModifyExpressionValue(
+            method = "extractRenderState",
+            at = @At(value = "INVOKE", target = "Lnet/minecraft/util/ARGB;white(F)I"))
+    private int titlescreen$fadeVersionText(int original) {
+        return TitlescreenVideoManager.get().scaleTitleTextAlpha(original);
+    }
+
+    /**
+     * The splash text is drawn with vanilla's fade as its alpha, so it can be scaled the same way - and
+     * skipped entirely when the mod is asked to hide it.
+     */
+    @WrapOperation(
             method = "extractRenderState",
             at = @At(value = "INVOKE",
                     target = "Lnet/minecraft/client/gui/components/SplashRenderer;extractRenderState(Lnet/minecraft/client/gui/GuiGraphicsExtractor;ILnet/minecraft/client/gui/Font;F)V"))
-    private void titlescreen$hideSplashText(SplashRenderer splash, GuiGraphicsExtractor graphics, int width,
-                                            Font font, float alpha) {
-        if (!TitlescreenVideoManager.get().shouldHideSplashText()) {
-            splash.extractRenderState(graphics, width, font, alpha);
+    private void titlescreen$fadeSplashText(SplashRenderer splash, GuiGraphicsExtractor graphics, int width,
+                                            Font font, float alpha, Operation<Void> original) {
+        if (TitlescreenVideoManager.get().shouldHideSplashText()) {
+            return;
         }
+        float scaled = TitlescreenVideoManager.get().scaleSplashAlpha(alpha);
+        if (scaled <= 0.004F) {
+            return;
+        }
+        original.call(splash, graphics, width, font, scaled);
     }
 }

@@ -11,6 +11,10 @@ configurable **video intro** - typically one baked clip that covers the whole st
 - the loading overlay is unloaded at a configurable **timestamp in the video**,
 - the video (alpha channel + audio supported) is composited on top of everything,
 - the title screen buttons **fade in at a configurable video timestamp**,
+- the **version/mod-count line and the splash text** fade in on their own configurable timestamp, and the
+  **Realms notification badge** fades in on the buttons' timetable from the moment it can be seen (its sprites
+  are drawn without any alpha of their own, and the overlay they live in is only drawn once vanilla's fade
+  finished, so vanilla pops it in),
 - the buttons get their own **vertical offset** and their own **GUI scale**, independent of the rest of the UI,
 - when the video ends it can **loop a region**, **fade back to the vanilla panorama** or **freeze** on the last frame,
 - the vanilla "MINECRAFT" wordmark is hidden by default (configurable).
@@ -208,6 +212,8 @@ from the anchor is used after a few seconds so the loading screen still clears.
 | --- | --- | --- |
 | `videoPath` | `config/titlescreen/intro.webm` | Video file, relative to the game directory. |
 | `videoVolume` | `100` | Audio volume, 0-100. |
+| `audioDelayMs` | `0` | Shifts a baked video's sound relative to its picture in milliseconds. Positive plays the sound later - the usual fix, because the picture arrives a few frames late at 4K while the sound does not. Tune by ear; a faster machine needs less, or a negative value. |
+| `audioInSamePlayer` | `false` | Play the sound inside the video player instead: one clock, so no drift and no delay needed. The sound then shares the video's demux, so it can stutter while the game loads a resource pack. |
 | `videoOpacity` | `100` | Extra opacity multiplier on top of the video's alpha. |
 | `videoFit` | `COVER` | `COVER` (crop), `CONTAIN` (letterbox) or `STRETCH`. |
 | `videoMaxFps` | `60` | Upper bound for GPU texture uploads per second, `0` = unlimited. |
@@ -225,6 +231,8 @@ from the anchor is used after a few seconds so the loading screen still clears.
 | `overlayUnloadStyle` | `INSTANT` | `INSTANT` drops the loading scene at the timestamp; `VANILLA_FADE` uses vanilla's two second cross-fade underneath the video. |
 | `buttonsFadeInAtMs` | `900` | Video timestamp at which the buttons start fading in. |
 | `buttonsFadeInDurationMs` | `1000` | How long the buttons take to fade in. |
+| `textFadeInAtMs` | `900` | Video timestamp at which the version/mod-count line and the splash text start fading in (fully transparent before it). The Realms badge fades in from the moment it appears instead. |
+| `textFadeInDurationMs` | `1000` | How long those texts take to fade in (also the Realms badge's fade). |
 | `videoFadeOutMs` | `1200` | Fade used by `FADE_OUT_TO_PANORAMA`. |
 | `endBehaviour` | `FADE_OUT_TO_PANORAMA` | `LOOP_REGION`, `FADE_OUT_TO_PANORAMA` or `FREEZE_LAST_FRAME`. |
 | `loopStartMs` / `loopEndMs` | `0` / `0` | Loop region for `LOOP_REGION`; `loopEndMs = 0` means end of video. |
@@ -254,6 +262,45 @@ from the anchor is used after a few seconds so the loading screen still clears.
 | `loadingBackground.replayOnResourceReload` | `true` | Replays the background on resource reload splashes. |
 | `loadingBackground.waitForVideoToFinish` | `true` | Keeps the loading screen up until the clip has played to the end, so the next scene (intro/title) never starts mid-clip. |
 | `loadingBackground.maxWaitForVideoMs` | `30000` | Safety net for the option above: continue loading after this long even if the video never ends (`0` = wait forever). |
+
+### Audio cuts in and out while the game is loading
+
+In a baked setup (`loadingBackground.useIntroVideo: true`) the sound is played by its **own audio-only
+player**, so a slow video pipeline cannot starve it. If you still hear gaps, `debugLogging: true` prints how
+fast the video really plays (`Loading video is playing at N fps`) - and since the audio is independent now,
+a low number there means the picture is dropping frames, not that the sound is at risk.
+
+A source that is too heavy for the machine still costs frames, and the cheapest fix is on the file:
+
+1. **8-bit sources are much cheaper than 10-bit ones.** A 10-bit 4:2:2 clip is converted to 8-bit RGBA on
+   the CPU for every frame; 8-bit 4:2:0 skips most of that work. Re-encoding keeps the audio untouched:
+   ```bash
+   ffmpeg -i intro.webm -c:v libvpx-vp9 -pix_fmt yuv420p -crf 28 -b:v 0 -deadline good -cpu-used 3 \
+          -row-mt 1 -c:a copy -y intro_8bit.webm
+   ```
+2. **`video.hardwareDecoding: true`** (the default) keeps the decode itself off the CPU where the driver
+   supports the codec.
+3. A lower `videoMaxFps` / `loadingBackground.maxFps` does *not* help here - the cost is per decoded frame,
+   not per upload.
+
+The picture and the sound are separate players with their own clocks, so their positions are equalised while
+both are paused: at the freeze frame both are seeked onto exactly `holdAtMs`, and when the loading scene
+starts the sound is seeked to the same position as the picture. Doing it while paused means it cannot be
+heard, and afterwards both run in real time from the same frame. The remaining difference is the audio
+output's own re-fill after such a seek - tens of milliseconds, and constant rather than growing. If a
+constant offset remains, `video.audioDelayMs` shifts the sound by that many milliseconds (positive plays it
+later); the picture's pipeline is the slow one at 4K, so a positive value is the usual fix.
+
+With `debugLogging: true` a heartbeat is logged every 5 s while a video is on screen (frame counters, alpha,
+positions, scene flags). It exists so that a stalled scene is visible in the log: a freeze that leaves no
+other trace is otherwise impossible to tell apart from a log that simply ended.
+
+Note that the sound can start a hair after the picture, but no longer by a noticeable margin: the audio
+player's preload is silenced with a **startup volume** (`--volume=0`) instead of by switching its audio track
+off. Switching the track off stops libVLC from ever creating its audio output, and creating that output when
+the loading scene begins costs about a second of silence *and* the same second of delay - libVLC then plays
+the samples it queued from the start, so the sound runs behind the picture. A player that starts silently at
+volume 0 has a live audio output from the first samples: resuming it only means turning the volume up.
 
 ### Video never shows up, or the game seems frozen
 
@@ -298,13 +345,20 @@ taking over.
   draws it through the vanilla GUI render pipeline, so it composes with the new 26.2 render-state system.
 - Frames are kept at the video's native size and handed to libVLC with our own buffer format: no scaler
   inside libVLC (that crashed natively more than once) and no resampling pass in Java.
+- The video is drawn with a **linear, clamp-to-edge** sampler instead of the nearest/repeat one Minecraft
+  creates dynamic textures with, so scaling the clip to the screen is filtered rather than point-sampled
+  (that point sampling is what made the picture look blocky and jagged next to a video player's scaler).
 - Everything that can be done off the render thread is: an opaque scene's alpha is dropped while libVLC's
   thread writes the frame, which is where the spare time is. Doing it per pixel on the render thread cost
   more than the rest of the frame combined at 4K, and that was what made the loading video stutter.
 - The loading scene's video is **preloaded during early startup** (libVLC loaded before the window exists,
   first frame decoded and then paused), so it is already on screen the moment the loading screen appears.
-- With a baked single video there is exactly one player and one texture for both scenes, so the hand-over
-  allocates, opens and decodes nothing.
+- With a baked single video there is exactly one *video* player and one texture for both scenes, so the
+  hand-over allocates, opens and decodes nothing. Its **sound** is played by a separate audio-only player:
+  one player has one demux and decoder path for both streams, so a 4K video that falls behind while the
+  game loads a resource pack delays the audio packets with it - which is heard as the sound cutting out.
+  Two players, two sets of threads: the picture may drop frames, the sound does not. (Two *video* players on
+  the same 4K file is still the thing that crashed natively, so the picture stays in one player.)
 - Frames produced while the render thread is busy are dropped instead of queued.
 - Nothing is started on the render thread: player creation, teardown and all libVLC control calls happen on
   background threads (see `VlcVideoPlayer`).

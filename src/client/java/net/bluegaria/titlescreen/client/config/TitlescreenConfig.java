@@ -105,7 +105,28 @@ public class TitlescreenConfig implements ConfigData {
         @ConfigEntry.BoundedDiscrete(min = 0, max = 100)
         public int videoVolume = 100;
 
-        /** Extra opacity multiplier applied on top of the video's own alpha channel, 0-100. */
+        /**
+         * Play a baked video's sound in the video player instead of a separate audio-only player.
+         *
+         * <p>One player has one clock, so picture and sound cannot drift apart and no delay is needed - but
+         * the sound then shares the video's demux and decoder queue, so while the game loads a resource pack
+         * (when the 4K video cannot keep up) the sound can stutter. Off by default: the separate audio player
+         * keeps the sound clean and {@link #audioDelayMs} lines it up.</p>
+         */
+        @ConfigEntry.Gui.Tooltip
+        public boolean audioInSamePlayer = false;
+
+        /**
+         * Shifts a baked video's sound relative to its picture, in milliseconds. Positive plays the sound
+         * later - the fix when the sound runs ahead of the picture, which is what a heavy 4K video
+         * pipeline does (the picture arrives a few frames late, the sound does not). The same player
+         * plays the loading scene and the intro, so this stays constant for the whole clip.
+         */
+        @ConfigEntry.Gui.Tooltip
+        @ConfigEntry.BoundedDiscrete(min = -2000, max = 2000)
+        public int audioDelayMs = 0;
+
+        /** Extra opacity multiplier applied on top of the video's alpha channel, 0-100. */
         @ConfigEntry.Gui.Tooltip
         @ConfigEntry.BoundedDiscrete(min = 0, max = 100)
         public int videoOpacity = 100;
@@ -187,6 +208,19 @@ public class TitlescreenConfig implements ConfigData {
         @ConfigEntry.Gui.Tooltip
         @ConfigEntry.BoundedDiscrete(min = 0, max = 60000)
         public int buttonsFadeInDurationMs = 1000;
+
+        /**
+         * Video timestamp at which the title screen's texts (version/mod count and splash) and the Realms
+         * badge start fading in. They are fully transparent before it, like the buttons.
+         */
+        @ConfigEntry.Gui.Tooltip
+        @ConfigEntry.BoundedDiscrete(min = 0, max = 60000)
+        public int textFadeInAtMs = 900;
+
+        /** How long those texts take to fade in, in milliseconds. 0 makes them appear instantly. */
+        @ConfigEntry.Gui.Tooltip
+        @ConfigEntry.BoundedDiscrete(min = 0, max = 60000)
+        public int textFadeInDurationMs = 1000;
 
         /** Fade duration used by {@link EndBehaviour#FADE_OUT_TO_PANORAMA}. */
         @ConfigEntry.Gui.Tooltip
@@ -420,6 +454,7 @@ public class TitlescreenConfig implements ConfigData {
         this.video.videoVolume = clamp(this.video.videoVolume, 0, 100);
         this.video.videoOpacity = clamp(this.video.videoOpacity, 0, 100);
         this.video.videoMaxFps = clamp(this.video.videoMaxFps, 0, 240);
+        this.video.audioDelayMs = clamp(this.video.audioDelayMs, -2000, 2000);
 
         Timing t = this.timing;
         t.videoStartDelayMs = Math.max(0, t.videoStartDelayMs);
@@ -430,6 +465,8 @@ public class TitlescreenConfig implements ConfigData {
         t.buttonsFadeInAtMs = Math.max(0, t.buttonsFadeInAtMs);
         t.buttonsFadeInDurationMs = Math.max(0, t.buttonsFadeInDurationMs);
         t.videoFadeOutMs = Math.max(0, t.videoFadeOutMs);
+        t.textFadeInAtMs = Math.max(0, t.textFadeInAtMs);
+        t.textFadeInDurationMs = Math.max(0, t.textFadeInDurationMs);
         t.loopStartMs = Math.max(0, t.loopStartMs);
         t.loopEndMs = Math.max(0, t.loopEndMs);
         if (t.loopEndMs > 0 && t.loopEndMs <= t.loopStartMs) {

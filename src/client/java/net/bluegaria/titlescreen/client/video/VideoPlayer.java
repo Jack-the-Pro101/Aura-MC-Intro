@@ -55,6 +55,27 @@ public interface VideoPlayer {
     void setPaused(boolean paused);
 
     /**
+     * Runs a playback-time query on the player's own thread and hands the result to the consumer.
+     *
+     * <p>libVLC's time query is a native call, so it must never run on the client thread - the player's
+     * command thread is exactly the right place for it. Meant for diagnostics: the returned value is the
+     * time libVLC itself is at (the displayed picture / the played sound), not the cached event value.</p>
+     *
+     * @param consumer receives the position in milliseconds, or {@code -1} when unknown
+     */
+    default void queryTimeMs(java.util.function.LongConsumer consumer) {
+        consumer.accept(-1L);
+    }
+
+    /**
+     * Shifts this player's sound relative to its picture, in milliseconds (positive plays it later).
+     * Only meaningful for an audio-only player: it is how the sound is lined up with a picture that a
+     * separate player produces.
+     */
+    default void setAudioDelayMs(long delayMs) {
+    }
+
+    /**
      * Opens the file and decodes the first frame, then waits paused. Used so that the loading
      * screen background can be on screen the instant the loading screen appears.
      */

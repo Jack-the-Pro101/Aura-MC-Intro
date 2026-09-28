@@ -12,6 +12,7 @@ import net.minecraft.client.gui.screens.Overlay;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.server.packs.resources.ReloadInstance;
+import net.minecraft.util.ARGB;
 import net.minecraft.util.Mth;
 import net.minecraft.util.Util;
 import org.slf4j.Logger;
@@ -49,6 +50,16 @@ public final class TitlescreenVideoManager {
 
     private VideoPlayer player = new VlcVideoPlayer();
     private VideoPlayer backgroundPlayer = new VlcVideoPlayer();
+
+    /**
+     * The sound of a baked video, played by a player of its own.
+     *
+     * <p>A combined player shares one demux and decoder path between both streams, and while the game loads
+     * a resource pack the 4K video cannot keep up - which delayed the audio packets with it and was heard as
+     * the sound cutting in and out. Separate players have separate threads: the picture may drop frames, the
+     * sound will not.</p>
+     */
+    private VideoPlayer audioPlayer = VlcVideoPlayer.audioOnly();
 
     private final VideoTextureLayer introTexture =
             new VideoTextureLayer("titlescreen", "video_frame", "Titlescreen intro video");
@@ -88,6 +99,16 @@ public final class TitlescreenVideoManager {
     private long lastBackgroundFrameCount = -1L;
     private long lastBackgroundProgressMs;
     private boolean backgroundAbandoned;
+    /** One-shot debug report of how many frames the loading scene's video really produces. */
+    private boolean loadingFrameRateReported;
+    /** One-shot report of the A/V offset while the loading scene plays. */
+    private boolean loadingSyncReported;
+    /** Timestamp of the last heartbeat line (debug logging only). */
+    private long lastHeartbeatMs;
+    /** When a badge widget first appeared, so it can fade in from that moment (see titleBadgeAlpha). */
+    private long badgeFirstSeenMs;
+    private long loadingFpsBaseline = -1L;
+    private long loadingFpsBaselineMs;
     private long lastIntroFrameCount = -1L;
     private static final long HANDOVER_TIMEOUT_MS = 4000L;
     private long lastIntroUploadCount = -1L;
@@ -146,6 +167,7 @@ public final class TitlescreenVideoManager {
         this.lastTickMs = Util.getMillis();
         TitlescreenConfig cfg = TitlescreenConfigHolder.get();
         updatePlaybackWatchdogs(cfg);
+        logHeartbeat(cfg);
         if (!cfg.general.enabled) {
             if (this.anchorSet || this.sessionActive || this.startRequested
                     || this.backgroundActive || this.backgroundStartRequested
@@ -178,6 +200,20 @@ public final class TitlescreenVideoManager {
             if (cfg.general.debugLogging) {
                 LOGGER.info("Loading background video preloaded (first frame ready, paused)");
             }
+        }
+        if (this.backgroundActive && !this.loadingSyncReported
+                && Util.getMillis() - this.backgroundStartMs >= 1200L) {
+            this.loadingSyncReported = true;
+            reportSync("loading scene");
+        }
+
+        if (this.audioPlayer.consumePauseAfterFirstFrame()) {
+            this.audioPlayer.setPaused(true);
+            // Park the sound at the clip's start too. The video is seeked back to 0 when the loading scene
+            // begins (its preload ran ahead while the game started up); doing the same here, while the audio
+            // output is paused and its buffer empty, costs nothing - doing it at that moment instead made
+            // the sound re-prime right when it had to be audible, which pushed it behind the picture.
+            this.audioPlayer.seekMs(0L);
         }
 
         // A failed start is usually a moment of native start-up contention; giving up for the whole
@@ -318,10 +354,16 @@ public final class TitlescreenVideoManager {
         }
         this.backgroundPreloadTriggered = true;
         startStallWatchdog();
-        if (isBakedVideo(TitlescreenConfigHolder.get())) {
-            // A single baked video is played by ONE player for both scenes: the loading scene plays it and
-            // holds the freeze frame, the intro simply continues. Two players on the same 4K file (each
-            // with its own decoder and video output) is what crashed natively.
+        TitlescreenConfig cfg = TitlescreenConfigHolder.get();
+        if (isBakedVideo(cfg)) {
+            // A single baked video is played by ONE *video* player for both scenes: the loading scene plays
+            // it and holds the freeze frame, the intro simply continues. Two video players on the same 4K
+            // file (each with its own decoder and video output) is what crashed natively.
+            // Its sound comes either from that player itself (one clock, no drift, but the sound shares the
+            // video's demux) or from the separate audio-only player - see the audioPlayer field.
+            this.backgroundPlayer = cfg.video.audioInSamePlayer
+                    ? new VlcVideoPlayer()
+                    : VlcVideoPlayer.silentVideo();
             this.player = this.backgroundPlayer;
         }
         preloadLoadingBackground();
@@ -395,6 +437,11 @@ public final class TitlescreenVideoManager {
             // Volume 0: the preload decodes the first frame while the game is still starting up, and
             // playing the audio there would be heard long before anything is on screen.
             boolean ok = this.backgroundPlayer.preload(path, 0, cfg.video.libVlcPath);
+            if (usesSeparateAudioPlayer(cfg)) {
+                // Silent again (volume 0) and paused on its first samples, so it cannot run ahead of the
+                // loading scene that will play it either.
+                this.audioPlayer.preload(path, 0, cfg.video.libVlcPath);
+            }
             synchronized (this) {
                 this.backgroundPreloadRequested = false;
                 if (!ok) {
@@ -432,7 +479,8 @@ public final class TitlescreenVideoManager {
             // video (and its audio) would start half-way through. Seeking is unconditional: asking the
             // player for its position here would be another native call on the client thread.
             long preloadPositionMs = this.backgroundPlayer.cachedTimeMs();
-            if (preloadPositionMs > 300L) {
+            boolean restartFromStart = preloadPositionMs > 300L;
+            if (restartFromStart) {
                 // Only when the silent preload ran noticeably ahead (it starts playing as soon as libVLC
                 // has opened the file). Seeking flushes the decoder and briefly shows a black frame, so
                 // doing it unconditionally caused the visible flash between the preload frame and the
@@ -443,10 +491,20 @@ public final class TitlescreenVideoManager {
             // The volume was forced to 0 for the silent preload - apply the configured one now that
             // the video is actually on screen.
             this.backgroundPlayer.setVolume(cfg.loadingBackground.volume);
+            if (usesSeparateAudioPlayer(cfg)) {
+                this.audioPlayer.resumeFromPreload();
+                this.audioPlayer.setVolume(cfg.loadingBackground.volume);
+                this.audioPlayer.setAudioDelayMs(cfg.video.audioDelayMs);
+                if (cfg.video.audioDelayMs != 0 && cfg.general.debugLogging) {
+                    LOGGER.info("Shifting the sound by {} ms to line it up with the picture",
+                            cfg.video.audioDelayMs);
+                }
+            }
             if (cfg.general.debugLogging) {
                 LOGGER.info("Loading background video resumed from its preloaded first frame "
-                        + "(preload position {} ms)", preloadPositionMs);
+                                + "(video position {} ms)", preloadPositionMs);
             }
+            this.loadingSyncReported = false;
             return;
         }
         if (this.backgroundPlayedOnce && !cfg.loadingBackground.replayOnResourceReload) {
@@ -476,6 +534,9 @@ public final class TitlescreenVideoManager {
             this.backgroundPlayer.setDebugLogging(cfg.general.debugLogging);
             this.backgroundPlayer.setHardwareDecoding(cfg.video.hardwareDecoding && !this.forceSoftwareDecoding);
             boolean ok = this.backgroundPlayer.start(path, cfg.loadingBackground.volume, cfg.video.libVlcPath);
+            if (ok && usesSeparateAudioPlayer(cfg)) {
+                this.audioPlayer.start(path, cfg.loadingBackground.volume, cfg.video.libVlcPath);
+            }
             if (this.backgroundGeneration != generation) {
                 this.backgroundPlayer.close();
                 return;
@@ -661,7 +722,10 @@ public final class TitlescreenVideoManager {
             this.lastIntroUploadCount = -1L;
             this.lastIntroUploadMs = Util.getMillis();
             this.player.setVolume(cfg.video.videoVolume);
-            this.player.setPaused(false);
+            this.audioPlayer.setVolume(cfg.video.videoVolume);
+            this.audioPlayer.setAudioDelayMs(cfg.video.audioDelayMs);
+            this.audioPlayer.setPaused(false);
+            reportSync("title screen");
             if (cfg.general.debugLogging) {
                 LOGGER.info("Video intro continues from the held frame ({} ms)",
                         cfg.loadingBackground.holdAtMs);
@@ -738,10 +802,19 @@ public final class TitlescreenVideoManager {
             this.player.setDebugLogging(cfg.general.debugLogging);
             this.player.setHardwareDecoding(cfg.video.hardwareDecoding && !this.forceSoftwareDecoding);
             boolean ok = this.player.start(path, cfg.video.videoVolume, cfg.video.libVlcPath);
+            if (usesSeparateAudioPlayer(cfg)) {
+                // Reached when a baked video is retried (normally its sound is already playing): restart it
+                // with the video so both stay together.
+                this.audioPlayer.start(path, cfg.video.videoVolume, cfg.video.libVlcPath);
+                this.audioPlayer.setAudioDelayMs(cfg.video.audioDelayMs);
+            }
             if (ok && startAtMs > 0L) {
                 // Seeking on the player's own thread, before the intro is shown, so its timeline (which
                 // starts with the first displayed frame) is relative to the baked intro.
                 this.player.seekMs(startAtMs);
+                if (isBakedVideo(cfg)) {
+                    this.audioPlayer.seekMs(startAtMs);
+                }
             }
             if (this.sessionGeneration != generation) {
                 // The session was torn down while libVLC was still starting up.
@@ -869,6 +942,7 @@ public final class TitlescreenVideoManager {
         if (wasActive) {
             this.player.close();
         }
+        this.audioPlayer.close();
         stopLoadingBackground(minecraft);
     }
 
@@ -950,6 +1024,62 @@ public final class TitlescreenVideoManager {
     }
 
     /**
+     * Reports where the picture and the sound are, as libVLC itself sees them (debug logging only).
+     *
+     * <p>The two are separate players, so their own positions are the honest way to see how far apart they
+     * are. The sound lagging comes from the audio output's own start-up latency, which differs from launch
+     * to launch - which is why no fixed offset ever fit.</p>
+     */
+    /**
+     * Periodic debug line while a video is on screen (every 5 s).
+     *
+     * <p>Written so that a stalled scene is visible in the log: the frame counters say whether frames are
+     * still produced and drawn, the alpha says whether the scene is fading, and the positions say whether
+     * the two players are drifting apart. A freeze that leaves no other trace at all is otherwise
+     * impossible to tell apart from a log that simply ended.</p>
+     */
+    /** True when a baked video's sound is played by its own player rather than by the video player. */
+    private static boolean usesSeparateAudioPlayer(TitlescreenConfig cfg) {
+        return isBakedVideo(cfg) && !cfg.video.audioInSamePlayer;
+    }
+
+    private void logHeartbeat(TitlescreenConfig cfg) {
+        if (!cfg.general.debugLogging) {
+            return;
+        }
+        long now = Util.getMillis();
+        if (now - this.lastHeartbeatMs < 5000L) {
+            return;
+        }
+        this.lastHeartbeatMs = now;
+        if (!this.backgroundActive && !this.sessionActive) {
+            return;
+        }
+        LOGGER.info("Heartbeat: loading {} produced / {} drawn, intro {} produced / {} drawn, alpha {}, "
+                        + "picture {} ms, sound {} ms (backgroundActive={} sessionActive={} frozen={} ended={})",
+                this.backgroundPlayer.sink().producedFrames(), this.backgroundFramesUploaded,
+                this.player.sink().producedFrames(), this.introFramesUploaded, videoAlpha(cfg),
+                this.player.cachedTimeMs(), this.audioPlayer.cachedTimeMs(),
+                this.backgroundActive, this.sessionActive, this.backgroundFrozen, this.ended);
+    }
+
+    private void reportSync(String where) {
+        if (!TitlescreenConfigHolder.get().general.debugLogging
+                || (!this.sessionActive && !this.backgroundActive)) {
+            return;
+        }
+        this.player.queryTimeMs(pictureMs -> this.audioPlayer.queryTimeMs(soundMs -> {
+            if (pictureMs < 0L || soundMs < 0L) {
+                return;
+            }
+            long difference = soundMs - pictureMs;
+            LOGGER.info("A/V at {}: picture {} ms, sound {} ms (sound {} ms {} the picture)",
+                    where, pictureMs, soundMs, Math.abs(difference),
+                    difference > 0L ? "ahead of" : "behind");
+        }));
+    }
+
+    /**
      * Watches both players for a playback that stops advancing, and gives up on it.
      *
      * <p>libVLC occasionally stops reporting progress for a media it is playing (never firing its end
@@ -966,9 +1096,47 @@ public final class TitlescreenVideoManager {
                 && this.backgroundPlayer.cachedTimeMs() >= cfg.loadingBackground.holdAtMs) {
             this.backgroundFrozen = true;
             this.backgroundPlayer.setPaused(true);
+            if (usesSeparateAudioPlayer(cfg)) {
+                // The sound stops with the picture while the game finishes loading.
+                this.audioPlayer.setPaused(true);
+                // Both players are paused now, so this cannot be heard - and seeking costs a re-prime that
+                // is only paid when playback resumes. Parking both on the very same frame is what keeps
+                // them together afterwards: the picture and the sound are separate players with their own
+                // clocks, so their positions have to be equalised while there is a chance to do it.
+                this.backgroundPlayer.seekMs(cfg.loadingBackground.holdAtMs);
+                this.audioPlayer.seekMs(cfg.loadingBackground.holdAtMs);
+                reportSync("freeze frame");
+            }
             if (cfg.general.debugLogging) {
-                LOGGER.info("Loading background video held at {} ms - waiting for the game to finish loading",
-                        cfg.loadingBackground.holdAtMs);
+                LOGGER.info("Loading background video held at {} ms - waiting for the game to finish loading "
+                                + "(sound at {} ms)",
+                        cfg.loadingBackground.holdAtMs, this.audioPlayer.cachedTimeMs());
+            }
+        }
+
+        // How fast the loading scene's video actually plays. A 4K source the machine cannot decode (a 10-bit
+        // one in software, for example) shows up here first: frames trickle in, the picture stutters and the
+        // audio needs the same CPU, so this is the number that explains both.
+        if (this.backgroundActive && !this.backgroundFrozen && !this.loadingFrameRateReported) {
+            long produced = this.backgroundPlayer.sink().producedFrames();
+            if (this.loadingFpsBaseline < 0L) {
+                this.loadingFpsBaseline = produced;
+                this.loadingFpsBaselineMs = now;
+            } else if (now - this.loadingFpsBaselineMs >= 1500L) {
+                this.loadingFrameRateReported = true;
+                long elapsedMs = Math.max(1L, now - this.loadingFpsBaselineMs);
+                long frames = produced - this.loadingFpsBaseline;
+                long fps = frames * 1000L / elapsedMs;
+                if (fps < 15L) {
+                    LOGGER.warn("The loading video only produced {} frames per second ({} frames in {} ms, {} "
+                                    + "drawn) - this machine cannot decode it fast enough, and that is also "
+                                    + "what starves its audio. Use a lighter source video (8-bit decodes far "
+                                    + "faster than 10-bit 4:2:2) and make sure video.hardwareDecoding is on.",
+                            fps, frames, elapsedMs, this.backgroundFramesUploaded);
+                } else if (cfg.general.debugLogging) {
+                    LOGGER.info("Loading video is playing at {} fps ({} frames produced, {} drawn in {} ms)",
+                            fps, frames, this.backgroundFramesUploaded, elapsedMs);
+                }
             }
         }
 
@@ -1088,6 +1256,92 @@ public final class TitlescreenVideoManager {
      * Alpha the title screen buttons should have, or {@code -1} when vanilla's own fade should
      * be used instead.
      */
+    /**
+     * Fade factor for the title screen's texts - the version/mod-count line and the splash - or {@code -1}
+     * when they are left to vanilla.
+     *
+     * <p>{@link net.bluegaria.titlescreen.mixin.client.TitleScreenMixin} scales their alpha with this, so
+     * they start fully transparent and fade in on the configured timetable instead of with vanilla's own
+     * screen fade, exactly like the buttons.</p>
+     */
+    public float titleTextAlphaFactor() {
+        TitlescreenConfig cfg = TitlescreenConfigHolder.get();
+        if (!cfg.general.enabled || !cfg.overrideButtonFade() || !holdingEligible() || this.ended) {
+            return -1.0F;
+        }
+        long time = videoTimeMs();
+        int start = cfg.timing.textFadeInAtMs;
+        if (time < start) {
+            return 0.0F;
+        }
+        int duration = cfg.timing.textFadeInDurationMs;
+        if (duration <= 0) {
+            return 1.0F;
+        }
+        return Mth.clamp((time - start) / (float) duration, 0.0F, 1.0F);
+    }
+
+    /**
+     * Scales the alpha of a title screen text colour to the configured fade, or returns it unchanged when
+     * the texts are vanilla's business.
+     */
+    public int scaleTitleTextAlpha(int colour) {
+        float factor = titleTextAlphaFactor();
+        if (factor < 0.0F) {
+            return colour;
+        }
+        return ARGB.color(Math.round(ARGB.alpha(colour) * factor),
+                ARGB.red(colour), ARGB.green(colour), ARGB.blue(colour));
+    }
+
+    /**
+     * Alpha for the badge-style widgets: the Realms and Friends icon buttons, and whatever the Realms
+     * notification screen draws.
+     *
+     * <p>Those cannot use the video timestamps like the buttons do. Badges appear when a service answers,
+     * and until the video hands the title screen over they are hidden behind the opaque loading overlay -
+     * so by the time one becomes visible the configured fade is usually already over, and it pops in. This
+     * fades from whichever came last: the widget showing up, or the title screen becoming visible.</p>
+     *
+     * @param present whether the badge exists this frame
+     */
+    public float titleBadgeAlpha(boolean present) {
+        TitlescreenConfig cfg = TitlescreenConfigHolder.get();
+        if (!cfg.general.enabled || !cfg.overrideButtonFade() || this.ended) {
+            return 1.0F;
+        }
+        if (!holdingEligible()) {
+            // Before the hand-over the badge is hidden behind the opaque loading overlay - it must not be
+            // visible already, or it appears the instant the overlay goes away.
+            return 0.0F;
+        }
+        if (!present) {
+            this.badgeFirstSeenMs = 0L;
+            return 1.0F;
+        }
+        if (this.badgeFirstSeenMs == 0L) {
+            this.badgeFirstSeenMs = Util.getMillis();
+        }
+        int duration = cfg.timing.buttonsFadeInDurationMs;
+        if (duration <= 0) {
+            return 1.0F;
+        }
+        // Badges fade on the buttons' timetable - so a longer button fade-in moves them along - but never
+        // before they can actually be seen.
+        long from = Math.max(this.badgeFirstSeenMs, this.anchorSetMs);
+        from = Math.max(from, this.t0Ms + cfg.timing.buttonsFadeInAtMs);
+        return Mth.clamp((Util.getMillis() - from) / (float) duration, 0.0F, 1.0F);
+    }
+
+    /**
+     * Scales the alpha the splash text is drawn with (vanilla passes its own screen fade, and the splash
+     * keeps its pulsing on top of it).
+     */
+    public float scaleSplashAlpha(float vanillaAlpha) {
+        float factor = titleTextAlphaFactor();
+        return factor < 0.0F ? vanillaAlpha : vanillaAlpha * factor;
+    }
+
     public float buttonAlphaOverride() {
         TitlescreenConfig cfg = TitlescreenConfigHolder.get();
         if (!cfg.general.enabled || !cfg.overrideButtonFade() || !holdingEligible() || this.ended) {

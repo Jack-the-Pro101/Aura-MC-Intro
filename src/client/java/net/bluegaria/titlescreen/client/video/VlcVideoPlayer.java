@@ -36,6 +36,52 @@ import java.util.concurrent.locks.ReentrantLock;
  */
 public final class VlcVideoPlayer implements VideoPlayer {
 
+    /**
+     * What this player does with the media.
+     *
+     * <p>A baked video (one file for the loading scene and the intro) is played by two players: the picture
+     * by a silent video player, the sound by an audio-only one. That is deliberate - separate players have
+     * separate demux and decoder threads. The video pipeline cannot always keep up while the game is loading
+     * a resource pack, and in a combined pipeline the late video delays the audio packets with it, which is
+     * heard as the sound cutting out. The picture may drop frames; the sound will not.</p>
+     */
+    public enum Mode {
+        /** Video through the callback vout, audio played by libVLC (an intro video on its own). */
+        VIDEO,
+        /** Video through the callback vout, audio output disabled. */
+        SILENT_VIDEO,
+        /** Audio only: no video output and no frame callbacks. */
+        AUDIO
+    }
+
+    private final Mode mode;
+
+    public VlcVideoPlayer() {
+        this(Mode.VIDEO);
+    }
+
+    private VlcVideoPlayer(Mode mode) {
+        this.mode = mode;
+    }
+
+    /** A video player whose audio output is disabled - see {@link Mode#SILENT_VIDEO}. */
+    public static VlcVideoPlayer silentVideo() {
+        return new VlcVideoPlayer(Mode.SILENT_VIDEO);
+    }
+
+    /** An audio-only player, independent of any video player - see {@link Mode#AUDIO}. */
+    public static VlcVideoPlayer audioOnly() {
+        return new VlcVideoPlayer(Mode.AUDIO);
+    }
+
+    private boolean hasVideoOutput() {
+        return this.mode != Mode.AUDIO;
+    }
+
+    private boolean hasAudioOutput() {
+        return this.mode != Mode.SILENT_VIDEO;
+    }
+
     private static final Logger LOGGER = LoggerFactory.getLogger("Titlescreen/Video");
     private static final String CHROMA = "RGBA";
     private static final String RV32_PREFIX = "RV32";
@@ -95,10 +141,15 @@ public final class VlcVideoPlayer implements VideoPlayer {
             this.pauseAfterFirstFrame = false;
             return false;
         }
-        if (volumePercent <= 0) {
-            // Only start re-asserting silence once the preload flag is set: the loop returns immediately
-            // otherwise, which is why the preload was occasionally audible for its first moments.
-            keepPreloadSilent();
+        if (hasAudioOutput() && volumePercent <= 0) {
+            // Silence comes from the startup volume (see playerArguments) plus this loop, never from
+            // switching the audio track off: that also stops libVLC from creating its audio output at all,
+            // and creating it when the scene begins costs about a second of sound *and* the same second of
+            // delay, because the samples queued from the start are then played late. A player that starts
+            // at volume 0 has a live, silent output that only has to be turned up. Only start re-asserting
+            // silence once the preload flag is set - the loop returns immediately otherwise, which is why
+            // the preload was occasionally audible for its first moments.
+            keepPreloadMuted();
         }
         return true;
     }
@@ -113,7 +164,6 @@ public final class VlcVideoPlayer implements VideoPlayer {
         if (this.preloaded) {
             this.preloaded = false;
             this.pauseAfterFirstFrame = false;
-            postCommand(() -> setAudioEnabled(this.player, true));
             setPaused(false);
         }
     }
@@ -159,20 +209,16 @@ public final class VlcVideoPlayer implements VideoPlayer {
                 LOGGER.warn("libVLC is still tearing down another player - starting the video anyway");
             }
             try {
-                this.factory = new MediaPlayerFactory(playerArguments(false));
+                this.factory = new MediaPlayerFactory(playerArguments(volumePercent <= 0));
                 this.player = this.factory.mediaPlayers().newEmbeddedMediaPlayer();
-                FormatCallback formatCallback = new FormatCallback();
-                CallbackVideoSurface surface = this.factory.videoSurfaces()
-                        .newVideoSurface(formatCallback, new FrameCallback(formatCallback), false);
-                this.player.videoSurface().set(surface);
+                if (hasVideoOutput()) {
+                    FormatCallback formatCallback = new FormatCallback();
+                    CallbackVideoSurface surface = this.factory.videoSurfaces()
+                            .newVideoSurface(formatCallback, new FrameCallback(formatCallback), false);
+                    this.player.videoSurface().set(surface);
+                }
                 this.player.events().addMediaPlayerEventListener(new PlayerEvents(file));
 
-                if (volumePercent <= 0) {
-                    // Neither the volume nor mute is honoured before libVLC has created its audio output,
-                    // but the audio track switch is - so a preload that plays (and therefore decodes the
-                    // frames the window opens onto) can still be silent.
-                    setAudioEnabled(this.player, false);
-                }
                 if (!this.player.media().play(file.toAbsolutePath().toString())) {
                     LOGGER.warn("libvlc refused to play {}", file);
                     close();
@@ -201,33 +247,6 @@ public final class VlcVideoPlayer implements VideoPlayer {
         LOGGER.info("libVLC video buffers: chroma={} buffer={}x{} (decoded frames are scaled by libVLC "
                         + "to this size; the true aspect ratio comes from the track size)",
                 format.getChroma(), bufferWidth, bufferHeight);
-    }
-
-    /**
-     * Switches the audio track on or off, so a player can run (and decode) silently.
-     *
-     * <p>Needed because the volume and mute settings are ignored until libVLC has created its audio output -
-     * the reason the preload used to be started paused, which in turn meant no frame was decoded until the
-     * loading screen resumed it. A track switch is honoured from the start.</p>
-     */
-    private static void setAudioEnabled(MediaPlayer mediaPlayer, boolean enabled) {
-        if (mediaPlayer == null) {
-            return;
-        }
-        try {
-            if (enabled) {
-                for (TrackDescription description : mediaPlayer.audio().trackDescriptions()) {
-                    if (description.id() >= 0) {
-                        mediaPlayer.audio().setTrack(description.id());
-                        return;
-                    }
-                }
-            } else {
-                mediaPlayer.audio().setTrack(-1);
-            }
-        } catch (Throwable t) {
-            LOGGER.debug("Could not switch the audio track (enabled={})", enabled, t);
-        }
     }
 
     /** Runs a libVLC control call on the command thread, swallowing whatever it throws. */
@@ -266,13 +285,12 @@ public final class VlcVideoPlayer implements VideoPlayer {
      * every other control call uses) until the preload is resumed closes that race; the resume clears
      * {@link #preloaded} before it queues anything, so this can never mute the real audio.</p>
      */
-    private void keepPreloadSilent() {
+    private void keepPreloadMuted() {
         postCommand(() -> {
             EmbeddedMediaPlayer current = this.player;
             if (!this.preloaded || current == null) {
                 return;
             }
-            setAudioEnabled(current, false);
             current.audio().setVolume(0);
             current.audio().setMute(true);
             if (!this.preloaded || this.player == null) {
@@ -284,18 +302,24 @@ public final class VlcVideoPlayer implements VideoPlayer {
                 Thread.currentThread().interrupt();
                 return;
             }
-            keepPreloadSilent();
+            keepPreloadMuted();
         });
     }
 
     /** libVLC command line for the media players. */
-    private String[] playerArguments(boolean startPaused) {
+    private String[] playerArguments(boolean silentStart) {
         List<String> arguments = new ArrayList<>(List.of("--no-video-title-show"));
-        if (startPaused) {
-            // The only reliable way to keep a preload silent: volume and mute are both ignored until libVLC
-            // has created its audio output, so a preload would otherwise play its first moments out loud
-            // while the game window is still coming up.
-            arguments.add("--start-paused");
+        if (!this.hasVideoOutput()) {
+            arguments.add("--no-video");
+        }
+        if (!this.hasAudioOutput()) {
+            arguments.add("--no-audio");
+        }
+        if (silentStart && hasAudioOutput()) {
+            // Start silent, but with an audio output that exists: resuming then costs nothing but turning
+            // the volume up, instead of creating the output (about a second of silence, and the same
+            // second of delay because libVLC plays the queued samples from the start).
+            arguments.add("--volume=0");
         }
         if (!this.debug) {
             arguments.add("--quiet");
@@ -370,6 +394,29 @@ public final class VlcVideoPlayer implements VideoPlayer {
         } catch (Throwable ignored) {
             // Media info is not ready yet - the next event tries again.
         }
+    }
+
+    @Override
+    public void queryTimeMs(java.util.function.LongConsumer consumer) {
+        // Only the value cached from libVLC's own events is reported. Querying the player itself is a native
+        // call on the command thread - the same class of call that once froze the render thread - and the
+        // event value is plenty for reporting how far the picture and the sound are apart.
+        consumer.accept(this.cachedTimeMs);
+    }
+
+    @Override
+    public void setAudioDelayMs(long delayMs) {
+        if (this.mode != Mode.AUDIO) {
+            // Only the audio-only player's sound is lined up with another player's picture.
+            return;
+        }
+        postCommand(() -> {
+            EmbeddedMediaPlayer current = this.player;
+            if (current != null) {
+                // libVLC's audio delay is in microseconds, not milliseconds.
+                current.audio().setDelay(delayMs * 1000L);
+            }
+        });
     }
 
     @Override
@@ -483,6 +530,11 @@ public final class VlcVideoPlayer implements VideoPlayer {
             postCommand(VlcVideoPlayer.this::applyPendingVolume);
             postCommand(() -> logAudioStateOnce(VlcVideoPlayer.this.player));
             cacheSourceSize(mediaPlayer);
+            if (VlcVideoPlayer.this.mode == Mode.AUDIO) {
+                // An audio-only player has no video callback to report its first samples, and the preload
+                // pauses on them so it cannot run ahead of the scene that shows the video.
+                VlcVideoPlayer.this.firstFrameSeen = true;
+            }
         }
 
         @Override
@@ -505,7 +557,8 @@ public final class VlcVideoPlayer implements VideoPlayer {
          * user guessing.
          */
         private void logAudioStateOnce(MediaPlayer mediaPlayer) {
-            if (this.audioReported) {
+            if (this.audioReported || VlcVideoPlayer.this.mode == Mode.SILENT_VIDEO) {
+                // A player with the audio output switched off has no audio state worth reporting.
                 return;
             }
             this.audioReported = true;
