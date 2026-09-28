@@ -28,10 +28,16 @@ public class TitlescreenPreLaunch implements PreLaunchEntrypoint {
 
     @Override
     public void onPreLaunch() {
-        String configuredPath = configuredLibVlcPath();
-        LOGGER.info("Pre-launch: loading libVLC's native libraries early so the loading video's first "
-                + "frame is ready when the window appears");
-        VlcNativeLibrary.warmUp(configuredPath);
+        Settings settings = readSettings();
+        if (settings.debug()) {
+            LOGGER.info("Pre-launch: loading libVLC's native libraries early so the loading video's first "
+                    + "frame is ready when the window appears");
+        }
+        VlcNativeLibrary.warmUp(settings.libVlcPath());
+    }
+
+    /** The two config values this early entry point needs. */
+    private record Settings(String libVlcPath, boolean debug) {
     }
 
     /**
@@ -39,17 +45,19 @@ public class TitlescreenPreLaunch implements PreLaunchEntrypoint {
      * available yet this early, and the native directory cache is filled only once, so it has to be the
      * same path the game would use later.
      */
-    private static String configuredLibVlcPath() {
+    private static Settings readSettings() {
         Path file = FabricLoader.getInstance().getConfigDir().resolve("titlescreen.json");
         try (Reader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
-            JsonObject root = JsonParser.parseReader(reader).getAsJsonObject();
-            JsonObject general = root.getAsJsonObject("general");
-            if (general != null && general.has("libVlcPath")) {
-                return general.get("libVlcPath").getAsString();
+            JsonObject general = JsonParser.parseReader(reader).getAsJsonObject()
+                    .getAsJsonObject("general");
+            if (general != null) {
+                String path = general.has("libVlcPath") ? general.get("libVlcPath").getAsString() : "";
+                boolean debug = general.has("debugLogging") && general.get("debugLogging").getAsBoolean();
+                return new Settings(path, debug);
             }
         } catch (Throwable t) {
-            LOGGER.debug("Could not read the libVLC folder from {} before launch", file, t);
+            LOGGER.debug("Could not read the titlescreen config from {} before launch", file, t);
         }
-        return "";
+        return new Settings("", false);
     }
 }

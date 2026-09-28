@@ -65,7 +65,8 @@ public final class VlcNativeLibrary {
                     continue;
                 }
                 applyDirectory(candidate);
-                LOGGER.info("Using libvlc from {}", candidate);
+                LOGGER.info("Using libVLC from {} (libraries and plugin dependencies loaded by absolute "
+                        + "path)", candidate);
                 available = true;
                 return true;
             }
@@ -138,7 +139,7 @@ public final class VlcNativeLibrary {
             }
             try {
                 System.load(core.toAbsolutePath().toString());
-                LOGGER.info("Preloaded {} so libvlc can resolve its dependencies", core);
+                LOGGER.debug("Preloaded {} so libvlc can resolve its dependencies", core);
             } catch (Throwable t) {
                 LOGGER.debug("Could not preload {} (most likely already loaded)", core, t);
             }
@@ -163,7 +164,7 @@ public final class VlcNativeLibrary {
                     System.setProperty("VLC_PLUGIN_PATH",
                             current.isEmpty() ? plugins.toString() : plugins + File.pathSeparator + current);
                 }
-                LOGGER.info("Using libVLC plugins from {}", plugins);
+                LOGGER.debug("Using libVLC plugins from {}", plugins);
                 break;
             }
         }
@@ -258,7 +259,7 @@ public final class VlcNativeLibrary {
             }
         }
         if (anyLoaded) {
-            LOGGER.info("Preloaded {} libVLC plugin dependencies from {} (no launcher wrapper needed)",
+            LOGGER.debug("Preloaded {} libVLC plugin dependencies from {} (no launcher wrapper needed)",
                     candidates.size() - pending.size(), directory);
         }
         return anyLoaded;

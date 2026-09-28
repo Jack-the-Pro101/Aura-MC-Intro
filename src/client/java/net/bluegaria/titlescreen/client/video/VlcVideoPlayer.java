@@ -4,7 +4,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import uk.co.caprica.vlcj.factory.MediaPlayerFactory;
 import uk.co.caprica.vlcj.player.base.MediaPlayer;
-import uk.co.caprica.vlcj.player.base.TrackDescription;
 import uk.co.caprica.vlcj.player.base.MediaPlayerEventAdapter;
 import uk.co.caprica.vlcj.player.embedded.EmbeddedMediaPlayer;
 import uk.co.caprica.vlcj.player.embedded.videosurface.CallbackVideoSurface;
@@ -13,13 +12,10 @@ import uk.co.caprica.vlcj.player.embedded.videosurface.callback.BufferFormatCall
 import uk.co.caprica.vlcj.player.embedded.videosurface.callback.RenderCallback;
 import uk.co.caprica.vlcj.media.VideoTrackInfo;
 
-import org.lwjgl.system.MemoryUtil;
-
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 import java.nio.ByteBuffer;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -557,8 +553,9 @@ public final class VlcVideoPlayer implements VideoPlayer {
          * user guessing.
          */
         private void logAudioStateOnce(MediaPlayer mediaPlayer) {
-            if (this.audioReported || VlcVideoPlayer.this.mode == Mode.SILENT_VIDEO) {
-                // A player with the audio output switched off has no audio state worth reporting.
+            if (this.audioReported || VlcVideoPlayer.this.mode == Mode.SILENT_VIDEO
+                    || !VlcVideoPlayer.this.debug) {
+                // Nothing worth reporting: the debug option is off, or this player has no audio output.
                 return;
             }
             this.audioReported = true;

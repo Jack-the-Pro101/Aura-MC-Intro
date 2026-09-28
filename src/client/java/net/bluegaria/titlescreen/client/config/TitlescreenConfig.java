@@ -108,19 +108,19 @@ public class TitlescreenConfig implements ConfigData {
         /**
          * Play a baked video's sound in the video player instead of a separate audio-only player.
          *
-         * <p>One player has one clock, so picture and sound cannot drift apart and no delay is needed - but
-         * the sound then shares the video's demux and decoder queue, so while the game loads a resource pack
-         * (when the 4K video cannot keep up) the sound can stutter. Off by default: the separate audio player
-         * keeps the sound clean and {@link #audioDelayMs} lines it up.</p>
+         * <p>On by default: one player has one clock, so picture and sound cannot drift apart and no delay is
+         * needed, and libVLC keeps the sound on time by dropping late video frames. The alternative - a
+         * separate audio player - is immune to a slow video pipeline, but then the two clocks have to be
+         * lined up by hand with {@link #audioDelayMs}.</p>
          */
         @ConfigEntry.Gui.Tooltip
-        public boolean audioInSamePlayer = false;
+        public boolean audioInSamePlayer = true;
 
         /**
-         * Shifts a baked video's sound relative to its picture, in milliseconds. Positive plays the sound
-         * later - the fix when the sound runs ahead of the picture, which is what a heavy 4K video
-         * pipeline does (the picture arrives a few frames late, the sound does not). The same player
-         * plays the loading scene and the intro, so this stays constant for the whole clip.
+         * Shifts the sound of a baked video relative to its picture, in milliseconds. Positive plays the
+         * sound later. Only used when {@link #audioInSamePlayer} is off: with one player for both streams
+         * they share a clock, and with a separate audio player this is what lines them up (the picture
+         * arrives a few frames late at 4K while the sound does not).
          */
         @ConfigEntry.Gui.Tooltip
         @ConfigEntry.BoundedDiscrete(min = -2000, max = 2000)

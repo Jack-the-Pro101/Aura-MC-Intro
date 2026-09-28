@@ -50,7 +50,9 @@ public class TitlescreenClient implements ClientModInitializer {
         }
         try {
             LibC.INSTANCE.setenv("ALSOFT_DRIVERS", "pulse,alsa", 1);
-            LOGGER.info("Set ALSOFT_DRIVERS=pulse,alsa so OpenAL can open an audio device");
+            if (TitlescreenConfigHolder.get().general.debugLogging) {
+                LOGGER.info("Set ALSOFT_DRIVERS=pulse,alsa so OpenAL can open an audio device");
+            }
         } catch (Throwable t) {
             LOGGER.debug("Could not set ALSOFT_DRIVERS", t);
         }

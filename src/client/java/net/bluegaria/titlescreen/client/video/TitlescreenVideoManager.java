@@ -105,6 +105,8 @@ public final class TitlescreenVideoManager {
     private boolean loadingSyncReported;
     /** Timestamp of the last heartbeat line (debug logging only). */
     private long lastHeartbeatMs;
+    /** Set when something failed: the mod then leaves the vanilla screens alone for the rest of the session. */
+    private volatile boolean broken;
     /** When a badge widget first appeared, so it can fade in from that moment (see titleBadgeAlpha). */
     private long badgeFirstSeenMs;
     private long loadingFpsBaseline = -1L;
@@ -164,6 +166,10 @@ public final class TitlescreenVideoManager {
     // ------------------------------------------------------------------
 
     public void onClientTick(Minecraft minecraft) {
+        guard("the client tick", () -> tick(minecraft));
+    }
+
+    private void tick(Minecraft minecraft) {
         this.lastTickMs = Util.getMillis();
         TitlescreenConfig cfg = TitlescreenConfigHolder.get();
         updatePlaybackWatchdogs(cfg);
@@ -639,6 +645,10 @@ public final class TitlescreenVideoManager {
      * a resource reload is slow, so that gap is very visible.</p>
      */
     public void drawLoadingBackground(GuiGraphicsExtractor graphics) {
+        guard("drawing the loading background", () -> drawLoadingBackgroundNow(graphics));
+    }
+
+    private void drawLoadingBackgroundNow(GuiGraphicsExtractor graphics) {
         TitlescreenConfig cfg = TitlescreenConfigHolder.get();
         VideoPlayer player = this.backgroundPlayer;
         if (!cfg.general.enabled || !cfg.loadingBackground.enabled || this.backgroundFailed
@@ -1024,6 +1034,29 @@ public final class TitlescreenVideoManager {
     }
 
     /**
+     * Runs one step of the mod, and on any failure disables it rather than letting the exception escape into
+     * Minecraft's render loop or tick. A video intro is never worth a crash: everything here falls back to the
+     * vanilla loading and title screens.
+     */
+    private void guard(String what, Runnable step) {
+        if (this.broken) {
+            return;
+        }
+        try {
+            step.run();
+        } catch (Throwable t) {
+            this.broken = true;
+            LOGGER.error("The video intro failed while {} - it is disabled for the rest of this session and "
+                    + "the vanilla screens are used", what, t);
+            try {
+                stopSession(Minecraft.getInstance());
+            } catch (Throwable ignored) {
+                // Already gone far enough wrong; nothing else to do.
+            }
+        }
+    }
+
+    /**
      * Reports where the picture and the sound are, as libVLC itself sees them (debug logging only).
      *
      * <p>The two are separate players, so their own positions are the honest way to see how far apart they
@@ -1048,7 +1081,7 @@ public final class TitlescreenVideoManager {
             return;
         }
         long now = Util.getMillis();
-        if (now - this.lastHeartbeatMs < 5000L) {
+        if (now - this.lastHeartbeatMs < 15000L) {
             return;
         }
         this.lastHeartbeatMs = now;
@@ -1056,10 +1089,11 @@ public final class TitlescreenVideoManager {
             return;
         }
         LOGGER.info("Heartbeat: loading {} produced / {} drawn, intro {} produced / {} drawn, alpha {}, "
-                        + "picture {} ms, sound {} ms (backgroundActive={} sessionActive={} frozen={} ended={})",
+                        + "picture {} ms, sound {} (backgroundActive={} sessionActive={} frozen={} ended={})",
                 this.backgroundPlayer.sink().producedFrames(), this.backgroundFramesUploaded,
                 this.player.sink().producedFrames(), this.introFramesUploaded, videoAlpha(cfg),
-                this.player.cachedTimeMs(), this.audioPlayer.cachedTimeMs(),
+                this.player.cachedTimeMs(),
+                this.audioPlayer.cachedTimeMs() < 0L ? "n/a" : Long.toString(this.audioPlayer.cachedTimeMs()),
                 this.backgroundActive, this.sessionActive, this.backgroundFrozen, this.ended);
     }
 
@@ -1469,6 +1503,10 @@ public final class TitlescreenVideoManager {
      * its alpha is dropped by the player's frame sink), so the hand-over is not a visible switch.</p>
      */
     public void drawIntroVideo(GuiGraphicsExtractor graphics) {
+        guard("drawing the intro video", () -> drawIntroVideoNow(graphics));
+    }
+
+    private void drawIntroVideoNow(GuiGraphicsExtractor graphics) {
         TitlescreenConfig cfg = TitlescreenConfigHolder.get();
         if (!cfg.general.enabled || this.failed || this.ended || !this.sessionActive
                 || !this.introVisible || graphics == null) {

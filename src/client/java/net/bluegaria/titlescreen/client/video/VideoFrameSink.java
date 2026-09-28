@@ -108,7 +108,7 @@ public final class VideoFrameSink {
                         // starves libVLC's output thread, which in turn stalls the decoder and the audio
                         // with it.
                         this.forceOpaque = false;
-                        LOGGER.info("Video has no transparency - skipping the alpha pass from now on");
+                        LOGGER.debug("Video has no transparency - skipping the alpha pass from now on");
                     }
                 }
                 if (this.forceOpaque) {

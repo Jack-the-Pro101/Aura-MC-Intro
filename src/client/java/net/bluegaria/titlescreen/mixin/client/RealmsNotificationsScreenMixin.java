@@ -27,7 +27,14 @@ public abstract class RealmsNotificationsScreenMixin {
     private void titlescreen$fadeBadgeSprites(GuiGraphicsExtractor graphics, RenderPipeline pipeline,
                                               Identifier sprite, int x, int y, int width, int height,
                                               Operation<Void> original) {
-        float alpha = TitlescreenVideoManager.get().titleBadgeAlpha(true);
+        float alpha;
+        try {
+            alpha = TitlescreenVideoManager.get().titleBadgeAlpha(true);
+        } catch (Throwable t) {
+            // The badge is decoration: if the mod's state cannot be read, draw it the vanilla way.
+            original.call(graphics, pipeline, sprite, x, y, width, height);
+            return;
+        }
         if (alpha <= 0.004F) {
             return;
         }

@@ -212,8 +212,8 @@ from the anchor is used after a few seconds so the loading screen still clears.
 | --- | --- | --- |
 | `videoPath` | `config/titlescreen/intro.webm` | Video file, relative to the game directory. |
 | `videoVolume` | `100` | Audio volume, 0-100. |
-| `audioDelayMs` | `0` | Shifts a baked video's sound relative to its picture in milliseconds. Positive plays the sound later - the usual fix, because the picture arrives a few frames late at 4K while the sound does not. Tune by ear; a faster machine needs less, or a negative value. |
-| `audioInSamePlayer` | `false` | Play the sound inside the video player instead: one clock, so no drift and no delay needed. The sound then shares the video's demux, so it can stutter while the game loads a resource pack. |
+| `audioDelayMs` | `0` | Shifts a baked video's sound relative to its picture in milliseconds. Positive plays the sound later. Only used when `audioInSamePlayer` is off - with one player for both streams they share a clock and need no delay. Tune by ear; a faster machine needs less, or a negative value. |
+| `audioInSamePlayer` | `true` | Play the sound inside the video player: one clock, so no drift and no delay needed, and libVLC keeps the sound on time by dropping late video frames. Off = a separate audio-only player, which a slow video pipeline cannot starve, but then `audioDelayMs` is what lines the two clocks up. |
 | `videoOpacity` | `100` | Extra opacity multiplier on top of the video's alpha. |
 | `videoFit` | `COVER` | `COVER` (crop), `CONTAIN` (letterbox) or `STRETCH`. |
 | `videoMaxFps` | `60` | Upper bound for GPU texture uploads per second, `0` = unlimited. |
@@ -283,13 +283,13 @@ A source that is too heavy for the machine still costs frames, and the cheapest 
 3. A lower `videoMaxFps` / `loadingBackground.maxFps` does *not* help here - the cost is per decoded frame,
    not per upload.
 
-The picture and the sound are separate players with their own clocks, so their positions are equalised while
-both are paused: at the freeze frame both are seeked onto exactly `holdAtMs`, and when the loading scene
-starts the sound is seeked to the same position as the picture. Doing it while paused means it cannot be
-heard, and afterwards both run in real time from the same frame. The remaining difference is the audio
-output's own re-fill after such a seek - tens of milliseconds, and constant rather than growing. If a
-constant offset remains, `video.audioDelayMs` shifts the sound by that many milliseconds (positive plays it
-later); the picture's pipeline is the slow one at 4K, so a positive value is the usual fix.
+The picture and the sound are separate players with their own clocks whenever `audioInSamePlayer` is off, and
+then their positions are equalised while both are paused: at the freeze frame both are seeked onto exactly
+`holdAtMs`, and when the loading scene starts the sound is seeked to the same position as the picture. Doing
+it while paused means it cannot be heard, and afterwards both run in real time from the same frame. The
+remaining difference is the audio output's own re-fill after such a seek - tens of milliseconds, constant
+rather than growing - and `video.audioDelayMs` shifts the sound by a fixed amount on top of it if that is not
+enough. With the default (one player for both streams) all of this is moot: there is one clock.
 
 With `debugLogging: true` a heartbeat is logged every 5 s while a video is on screen (frame counters, alpha,
 positions, scene flags). It exists so that a stalled scene is visible in the log: a freeze that leaves no
@@ -354,11 +354,9 @@ taking over.
 - The loading scene's video is **preloaded during early startup** (libVLC loaded before the window exists,
   first frame decoded and then paused), so it is already on screen the moment the loading screen appears.
 - With a baked single video there is exactly one *video* player and one texture for both scenes, so the
-  hand-over allocates, opens and decodes nothing. Its **sound** is played by a separate audio-only player:
-  one player has one demux and decoder path for both streams, so a 4K video that falls behind while the
-  game loads a resource pack delays the audio packets with it - which is heard as the sound cutting out.
-  Two players, two sets of threads: the picture may drop frames, the sound does not. (Two *video* players on
-  the same 4K file is still the thing that crashed natively, so the picture stays in one player.)
+  hand-over allocates, opens and decodes nothing - and by default that same player carries the sound, which
+  means picture and sound share one clock and cannot drift. (Two *video* players on the same 4K file is what
+  crashed natively, so the picture always stays in one player.)
 - Frames produced while the render thread is busy are dropped instead of queued.
 - Nothing is started on the render thread: player creation, teardown and all libVLC control calls happen on
   background threads (see `VlcVideoPlayer`).
