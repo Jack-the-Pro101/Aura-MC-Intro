@@ -1,21 +1,18 @@
 name: Build minimal FFmpeg
 
 # Builds the small FFmpeg libraries the mod bundles (VP9/Opus decoders, Matroska demuxing,
-# swscale/swresample and VP9-only hardware acceleration) for every supported platform, caches
-# them, and attaches them to a permanent GitHub release so local Gradle builds can use them
-# derived from the FFmpeg version; re-running the workflow replaces the assets.
+# swscale/swresample and VP9-only hardware acceleration) for every supported platform. Manual
+# only (workflow_dispatch), because the libraries rarely change:
 #
-#   gradle.properties:  ffmpeg_libraries=<folder containing the downloaded per-platform zips>
+#   1. Run this workflow from the repository's Actions tab.
+#   2. Download the five per-platform zips from the finished run's Artifacts section.
+#   3. Drop them into gradle/ffmpeg/libraries/ and commit them.
+#
+# The Gradle build then bundles the committed zips instead of the (much larger) bytedeco
+# libraries through the `ffmpeg_libraries` property in gradle.properties.
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - 'gradle/ffmpeg/**'
-      - '.github/workflows/ffmpeg.yml'
-
-permissions:
-  contents: write # the release upload
 
 env:
   FFMPEG_VERSION: '8.1.2'
@@ -44,7 +41,7 @@ jobs:
             os: macos-13
             packages: nasm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install toolchain
         run: |
@@ -72,14 +69,14 @@ jobs:
       # objects ("Relocations in generic ELF (EM: 183)"). Extracting per job is cheap and
       # always clean; the script additionally runs `make distclean` before configuring.
       - name: Cache FFmpeg sources
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: sources/ffmpeg.tar.xz
           key: ffmpeg-src-tarball-${{ env.FFMPEG_VERSION }}
 
       - name: Restore build output
         id: build-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: out
           key: ffmpeg-min-${{ env.FFMPEG_VERSION }}-${{ matrix.platform }}-${{ hashFiles('gradle/ffmpeg/build-minimal.sh') }}
@@ -92,43 +89,22 @@ jobs:
         env:
           FFMPEG_VERSION: ${{ env.FFMPEG_VERSION }}
 
-      # Explicit save (instead of actions/cache@v4's implicit post step) so a
+      # Explicit save (instead of the implicit post step of actions/cache) so a
       # failed build never caches a partial out/ directory.
       - name: Save build output
         if: success() && steps.build-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: out
           key: ffmpeg-min-${{ env.FFMPEG_VERSION }}-${{ matrix.platform }}-${{ hashFiles('gradle/ffmpeg/build-minimal.sh') }}
 
       - name: Upload build artifact (kept 90 days)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ffmpeg-${{ env.FFMPEG_VERSION }}-min-${{ matrix.platform }}
-          # Must match the zip name build-minimal.sh produces (and the name
-          # gradle/common.gradle downloads from the release): ffmpeg-<version>-min-<platform>.zip
+          # Must match the zip name build-minimal.sh produces: ffmpeg-<version>-min-<platform>.zip.
+          # Download it from this run's Artifacts and commit it unchanged into
+          # gradle/ffmpeg/libraries/ - the Gradle build bundles it from there.
           path: out/ffmpeg-${{ env.FFMPEG_VERSION }}-min-${{ matrix.platform }}.zip
           retention-days: 90
           if-no-files-found: error
-
-  release:
-    name: Attach libraries to the release
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all platform zips
-        uses: actions/download-artifact@v4
-        with:
-          path: zips
-          merge-multiple: true
-
-      - name: Create or update the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ffmpeg-min-${{ env.FFMPEG_VERSION }}
-        run: |
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
-              --title "Minimal FFmpeg ${{ env.FFMPEG_VERSION }}" \
-              --notes "Minimal FFmpeg shared libraries built by the ffmpeg.yml workflow. Download the zip for your platform into a folder and point the Gradle property \`ffmpeg_libraries\` at it to bundle these instead of the bytedeco builds."
-          gh release upload "$TAG" zips/*.zip --repo "$GITHUB_REPOSITORY" --clobber

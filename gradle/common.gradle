@@ -77,21 +77,10 @@ repositories {
 // The FFmpeg platforms bundled with the mod (prebuilt libraries from the JavaCPP presets).
 def ffmpegPlatforms = ['windows-x86_64', 'linux-x86_64', 'linux-arm64', 'macosx-x86_64', 'macosx-arm64']
 
-// Optional folder with custom minimal FFmpeg libraries (see gradle.properties). Declared here so
-// the trim tasks below can track it as an input: changing it re-runs them.
+// Folder with the committed minimal FFmpeg libraries (see gradle.properties): the zips the
+// ffmpeg.yml workflow uploads, downloaded from a workflow run's Artifacts by hand and committed
+// at gradle/ffmpeg/libraries/. Resolved per platform in the trim tasks below.
 def ffmpegLibsDir = (project.findProperty('ffmpeg_libraries') ?: '') as String
-
-// The minimal FFmpeg libraries can also be downloaded automatically, from the release that the
-// ffmpeg.yml workflow keeps updated for this repository. Inside GitHub Actions the repository is
-// known from the environment, so CI builds pick it up without any configuration.
-def ffmpegRelease = project.ffmpeg_version.toString().split('-')[0]
-def ffmpegLibsUrl = (project.findProperty('ffmpeg_libraries_url') ?: '') as String
-if (!ffmpegLibsUrl) {
-    def githubRepo = System.getenv('GITHUB_REPOSITORY')
-    if (githubRepo) {
-        ffmpegLibsUrl = "https://github.com/${githubRepo}/releases/download/ffmpeg-min-${ffmpegRelease}"
-    }
-}
 
 // The player only uses avutil/avcodec/avformat/swresample/swscale - avdevice, avfilter and the
 // ffmpeg/ffprobe command line programs (roughly 40% of every natives jar) are dead weight for
@@ -100,58 +89,7 @@ if (!ffmpegLibsUrl) {
 // and nested from there like any regular dependency.
 def ffmpegMaven = project.layout.buildDirectory.dir('ffmpeg-maven')
 
-// The downloaded minimal libraries are cached in the root build directory, shared by every
-// version node; a zip that is already there is reused, so only the first build pays for it. The
-// cache directory is keyed on the build script's hash, so a changed recipe (or re-enabled
-// hardware decoding) re-downloads instead of silently reusing stale libraries.
-def ffmpegScriptHash = {
-    try {
-        def bytes = java.security.MessageDigest.getInstance('SHA-256')
-                .digest(rootProject.file('gradle/ffmpeg/build-minimal.sh').bytes)
-        return bytes[0..7].collect { String.format('%02x', it) }.join()
-    } catch (Exception e) {
-        return 'noscript'
-    }
-}()
-def sharedLibsCache = project.rootProject.layout.buildDirectory.dir('ffmpeg-libraries/' + ffmpegScriptHash)
-def downloadTasks = [:]
-
 if (project.bundle_video_libraries.toBoolean()) {
-    if (ffmpegLibsUrl) {
-        ffmpegPlatforms.each { platform ->
-            def taskName = "downloadFfmpegLibraries${platform.replaceAll(/[^a-zA-Z0-9]/, '_')}"
-            // Hosted on the root project: every version node consumes the same cached zip, so the
-            // download happens once per platform, not once per node.
-            def existing = rootProject.tasks.names.find { it == taskName }
-            downloadTasks[platform] = existing != null
-                    ? rootProject.tasks.named(taskName)
-                    : rootProject.tasks.register(taskName) {
-                        description = "Downloads the minimal FFmpeg libraries (${platform}) from ${ffmpegLibsUrl}."
-                        def zipFile = sharedLibsCache.map { it.file("ffmpeg-${ffmpegRelease}-min-${platform}.zip") }
-                        outputs.file(zipFile)
-                        doLast {
-                            def target = zipFile.get().asFile
-                            if (target.exists()) {
-                                return
-                            }
-                            def url = "${ffmpegLibsUrl}/ffmpeg-${ffmpegRelease}-min-${platform}.zip"
-                            logger.lifecycle("Downloading the minimal FFmpeg libraries for {} from {}", platform, url)
-                            try {
-                                new java.net.URI(url).toURL().openStream().withCloseable { input ->
-                                    target.parentFile.mkdirs()
-                                    target.withOutputStream { output -> input.transferTo(output) }
-                                }
-                            } catch (Exception e) {
-                                logger.warn("Could not download the minimal FFmpeg libraries for {} ({}: {}) - " +
-                                        "bundling the prebuilt bytedeco libraries instead",
-                                        platform, e.getClass().getSimpleName(), e.getMessage())
-                                target.delete()
-                            }
-                        }
-                    }
-        }
-    }
-
     ffmpegPlatforms.each { platform ->
         def trimTask = tasks.register("trimFfmpegNatives${platform.replaceAll(/[^a-zA-Z0-9]/, '_')}") {
             description = "Trims the bundled FFmpeg natives (${platform}) to the libraries the player loads."
@@ -164,12 +102,24 @@ if (project.bundle_video_libraries.toBoolean()) {
                     .map { it.dir("net/bluegaria/ffmpeg/ffmpeg-natives/${project.ffmpeg_version}") }
                     .map { it.file("ffmpeg-natives-${project.ffmpeg_version}-${platform}.jar") }
             inputs.property('platform', platform)
-            inputs.property('ffmpegLibraries', ffmpegLibsDir)
             inputs.files(source)
-            if (downloadTasks[platform] != null) {
-                // The downloaded zip is an input, so a fresh download re-runs the trim.
-                dependsOn downloadTasks[platform]
-                inputs.files(downloadTasks[platform])
+
+            // The custom minimal libraries replace bytedeco's by name (same FFmpeg release, so
+            // the JNI wrappers bind unchanged): either <platform>.zip / ffmpeg-*-min-<platform>.zip
+            // in the ffmpeg_libraries folder, or a plain <platform>/ subfolder. The files are task
+            // inputs, so committing new zips re-runs the trim instead of nesting stale libraries.
+            // Relative folder paths resolve against the repository root, not the version node.
+            def customBase = ffmpegLibsDir ? project.rootProject.file(ffmpegLibsDir) : null
+            def customZip = customBase?.listFiles()?.find {
+                it.isFile() && (it.name == "${platform}.zip" || it.name.endsWith("-${platform}.zip"))
+            }
+            def customFolder = customBase ? new File(customBase, platform) : null
+            def customFolderFiles = customFolder?.isDirectory()
+                    ? customFolder.listFiles().findAll { it.isFile() } : []
+            if (customZip != null) {
+                inputs.file(customZip)
+            } else if (customFolderFiles) {
+                inputs.files(customFolderFiles)
             }
             outputs.file(outFile)
             doLast {
@@ -178,34 +128,15 @@ if (project.bundle_video_libraries.toBoolean()) {
                 target.parentFile.mkdirs()
 
                 // The bytedeco FFmpeg libraries can be replaced by custom minimal builds (same
-                // FFmpeg release, so bytedeco's JNI wrappers bind against them unchanged): either
-                // from an ffmpeg_libraries folder, or from the zip downloaded from the release
-                // that .github/workflows/ffmpeg.yml keeps updated. Entries whose file name matches
-                // a custom library are replaced by its bytes.
+                // FFmpeg release, so bytedeco's JNI wrappers bind against them unchanged): the
+                // zips committed under the ffmpeg_libraries folder (gradle/ffmpeg/libraries by
+                // default). Entries whose file name matches a custom library are replaced by its
+                // bytes.
                 def customLibs = [:]
-                def customDir = ffmpegLibsDir
-                def customZip = null
-                if (customDir) {
-                    // Relative paths resolve against the repository root, not the version node.
-                    def customBase = project.rootProject.file(customDir)
-                    // Accept <platform>.zip, ffmpeg-*-min-<platform>.zip (the workflow's naming)
-                    // or a plain <platform> subfolder.
-                    customZip = customBase.listFiles()?.find {
-                        it.isFile() && (it.name == "${platform}.zip" || it.name.endsWith("-${platform}.zip"))
-                    }
-                    def customFolder = new File(customBase, platform)
-                    if (customZip == null && customFolder.isDirectory()) {
-                        customFolder.eachFile { file -> if (file.isFile()) customLibs[file.name] = file.bytes }
-                        customZip = null
-                    }
-                } else if (ffmpegLibsUrl) {
-                    customZip = sharedLibsCache.get().file("ffmpeg-${ffmpegRelease}-min-${platform}.zip").asFile
-                    if (!customZip.isFile()) {
-                        logger.warn("No minimal FFmpeg libraries for {} - bundling the prebuilt " +
-                                "bytedeco libraries (the '{}' release does not have them yet?)",
-                                platform, ffmpegLibsUrl)
-                        customZip = null
-                    }
+                if (ffmpegLibsDir && customZip == null && customFolderFiles.isEmpty()) {
+                    logger.warn("No minimal FFmpeg libraries for {} in {} - bundling the prebuilt " +
+                            "bytedeco libraries (run the ffmpeg.yml workflow and commit its zips?)",
+                            platform, customBase)
                 }
                 if (customZip != null) {
                     new java.util.zip.ZipFile(customZip).withCloseable { z ->
@@ -215,6 +146,8 @@ if (project.bundle_video_libraries.toBoolean()) {
                             }
                         }
                     }
+                } else if (customFolderFiles) {
+                    customFolderFiles.each { file -> customLibs[file.name] = file.bytes }
                 }
 
                 new java.util.zip.ZipFile(inputJar).withCloseable { zip ->

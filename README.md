@@ -346,32 +346,35 @@ demuxer, VP9/Opus decoders and parsers, the file protocol, swscale and swresampl
 network) **with VP9 hardware decoding included** (VAAPI + NVDEC on Linux, D3D11VA/DXVA2 on
 Windows, VideoToolbox on macOS) for all five platforms: Linux x86-64 and ARM64 natively/cross-compiled
 on Ubuntu, Windows x86-64 through mingw-w64 on Ubuntu, and macOS through the native GitHub runners. The
-sources are downloaded once and cached, the build outputs are cached against the build script's hash, the
-zips are uploaded as artifacts (90 days) **and attached to a permanent GitHub release** (`ffmpeg-min-<version>`).
+downloaded tarball and the build outputs are cached, and the zips are uploaded as workflow artifacts
+(kept 90 days). The workflow is **manual-only** (`workflow_dispatch`) - the libraries rarely change.
 
 Because the minimal build is made from the **same FFmpeg release** the JavaCPP preset targets, the
 public ABI is identical and bytedeco's JNI wrappers work against it unchanged - only the fat codec
 payloads are gone. The zips come out at ~5 MB per platform instead of ~23 MB, shrinking the mod jar to
 roughly **40-50 MB** with all five platforms bundled.
 
-**Using the results:** the build picks the minimal libraries up automatically - set
-`ffmpeg_libraries_url` in `gradle.properties` to the release base (or rely on the default that is
-already pointed at this repository's `ffmpeg-min-<version>` release); builds inside GitHub Actions
-detect the repository from the environment on their own. The zips download once into
-`build/ffmpeg-libraries/` and are reused from there by every later build and version node. Until the
-release exists (or when a platform's zip is missing), the build warns and bundles the trimmed bytedeco
-libraries instead. A local folder works too, via `ffmpeg_libraries`:
+**Using the results:** run the workflow from the Actions tab, download the five zips from the finished
+run's Artifacts section, drop them into `gradle/ffmpeg/libraries/` **and commit them** - that folder is
+the default of the `ffmpeg_libraries` property in `gradle.properties`, so every later build (local and
+CI) bundles the committed libraries with no configuration:
 
-```properties
-# gradle.properties (or -P... on the command line) - either way:
-ffmpeg_libraries_url=https://github.com/Jack-the-Pro101/New-MC-Intro/releases/download/ffmpeg-min-8.1.2
-ffmpeg_libraries=<local folder with the zips>   # folder wins, if both are set
+```
+gradle/ffmpeg/libraries/
+  ffmpeg-8.1.2-min-linux-arm64.zip
+  ffmpeg-8.1.2-min-linux-x86_64.zip
+  ffmpeg-8.1.2-min-macosx-arm64.zip
+  ffmpeg-8.1.2-min-macosx-x86_64.zip
+  ffmpeg-8.1.2-min-windows-x86_64.zip
 ```
 
-The build then substitutes those libraries for the bytedeco ones while nesting (per platform; platforms
-without a zip fall back to the trimmed bytedeco build with a warning). `gradle/ffmpeg/build-minimal.sh`
-is the script behind the workflow and can also be run locally (`bash gradle/ffmpeg/build-minimal.sh
-linux-x86_64`); it is what keeps the CI recipe and local builds identical.
+The build substitutes those libraries for the bytedeco ones while nesting (per platform; platforms
+without a zip fall back to the trimmed bytedeco build with a warning, so a fresh clone without the
+committed zips still builds). A different folder works too, via `-Pffmpeg_libraries=<folder>` - it
+accepts `ffmpeg-*-min-<platform>.zip` / `<platform>.zip` files or plain `<platform>/` subfolders.
+`gradle/ffmpeg/build-minimal.sh` is the script behind the workflow and can also be run locally
+(`bash gradle/ffmpeg/build-minimal.sh linux-x86_64`); it is what keeps the CI recipe and local builds
+identical.
 
 ## Licensing note
 
