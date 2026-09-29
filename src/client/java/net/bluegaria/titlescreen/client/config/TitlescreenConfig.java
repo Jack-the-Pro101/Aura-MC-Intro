@@ -137,6 +137,16 @@ public class TitlescreenConfig implements ConfigData {
         @ConfigEntry.BoundedDiscrete(min = -2000, max = 2000)
         public int audioDelayMs = 0;
 
+        /**
+         * Output device for the video's sound. On Linux, where the sound plays through the system
+         * sound server (the same route as the game's own sound), this is a sink name as shown by
+         * the desktop's audio widget (e.g. {@code WH-CH520}); when the sound server cannot be used
+         * it is a Java Sound mixer name instead (the log lists them). Empty follows the system's
+         * default output.
+         */
+        @ConfigEntry.Gui.Tooltip
+        public String videoAudioDevice = "";
+
         /** Extra opacity multiplier applied on top of the video's alpha channel, 0-100. */
         @ConfigEntry.Gui.Tooltip
         @ConfigEntry.BoundedDiscrete(min = 0, max = 100)

@@ -24,13 +24,18 @@ configurable **video intro** - typically one baked clip that covers the whole st
 - the vanilla "MINECRAFT" wordmark can stay hidden while the video plays and **starts fading in the moment the
   video ends** (`fadeInAfterVideo`, on by default), so it cross-dissolves with the video's fade-out,
 
-Everything is configurable in-game through **Mod Menu → Config** (Cloth Config screen included in the jar).
+Everything is configurable in-game through **Mod Menu → Config** (a [Cloth Config](https://modrinth.com/mod/cloth-config)
+screen - Cloth Config is an external dependency and must be installed separately, see [Requirements](#requirements)).
 
 ## Requirements
 
 1. **Minecraft 1.21.10 / 1.21.11 / 26.1 / 26.2 / 26.3 + Fabric Loader ≥ 0.19.5** (Fabric API is required).
    Each release jar declares exactly the versions it was built against, so launchers pick the right file.
-2. **Nothing else.** The video is decoded by FFmpeg libraries that ship **inside the mod jar** (the
+2. **Cloth Config** - provides the in-game config screen and is **not** bundled with the mod jar, so
+   install it ([Modrinth](https://modrinth.com/mod/cloth-config)) alongside this mod. Mod Menu
+   ([Modrinth](https://modrinth.com/mod/modmenu)) is optional and is only needed to reach the screen
+   through **Mod Menu → Config**.
+3. **Nothing else.** The video is decoded by FFmpeg libraries that ship **inside the mod jar** (the
    prebuilt builds from the [JavaCPP presets](https://github.com/bytedeco/javacpp-presets):
    `libavformat`, `libavcodec`, `libavutil`, `libswscale`, `libswresample` - trimmed to what VP9
    playback needs, for Windows/Linux/macOS on x86-64 and ARM64). On first use they are extracted once
@@ -42,6 +47,14 @@ Everything is configurable in-game through **Mod Menu → Config** (Cloth Config
    The only mod-specific tweak to the environment is one Minecraft itself benefits from: on Linux the
    mod restricts OpenAL to `pulse,alsa` from inside the game process (an existing `ALSOFT_DRIVERS` is
    never overridden), so the game's own sound also comes up inside sandboxed launchers.
+
+   The video's sound takes the same road as the game's own sound: on Linux it plays through the
+   system sound server (PulseAudio, or PipeWire's compatibility layer) via libpulse - the same
+   client library and socket OpenAL uses - so both always land on the desktop's default output
+   (headphones vs. speakers) and follow its switching together. This also works inside sandboxed
+   launchers (Flatpak/Snap), where plain ALSA has no sound server behind it at all. Where libpulse
+   is missing, Java Sound takes over with a deliberate device choice (sound-server-backed devices
+   before raw hardware, which never follow the default-output setting).
 
 3. A video file, by default `config/titlescreen/intro.webm` inside your game directory.
    **You don't have to provide one**: the mod ships its video inside the jar and plays that whenever the
@@ -164,7 +177,8 @@ from the anchor is used after a few seconds so the loading screen still clears.
 | `videoPath`         | `config/titlescreen/intro.webm` | Video file, relative to the game directory.                                                                                                                                                                                                                                                        |
 | `videoVolume`       | `100`                           | Audio volume, 0-100.                                                                                                                                                                                                                                                                               |
 | `audioDelayMs`      | `0`                             | Shifts a baked video's sound relative to its picture in milliseconds. Positive plays the sound later. Only used when `audioInSamePlayer` is off - with one player for both streams they share a clock and need no delay. Tune by ear; a faster machine needs less, or a negative value.            |
-| `audioInSamePlayer` | `true`                          | Play the sound inside the video player: one clock, so no drift and no delay needed, and the decoder keeps the sound on time by dropping late video frames. Off = a separate audio-only player, which a slow video pipeline cannot starve, but then `audioDelayMs` is what lines the two clocks up. |
+| `audioInSamePlayer` | `true`                          | Play the sound inside the video player: one clock, so no drift and no delay needed, and the decoder keeps the sound on time by dropping late video frames. Off = a separate audio-only player, which a slow video pipeline cannot starve; that player is also resynchronised to the picture automatically whenever it falls behind or runs ahead by more than a fraction of a second. |
+| `videoAudioDevice`  | *(empty - automatic)*           | Output device the video's sound plays through. Empty follows the system's default output - the same one the game's own sound uses. On Linux this is a sink name as shown by the desktop's audio widget (e.g. the name of your headphones); only when the system sound server is unreachable is it a Java Sound mixer name instead (the log lists them). |
 | `videoOpacity`      | `100`                           | Extra opacity multiplier on top of the video's alpha.                                                                                                                                                                                                                                              |
 | `videoFit`          | `COVER`                         | `COVER` (crop), `CONTAIN` (letterbox) or `STRETCH`.                                                                                                                                                                                                                                                |
 | `videoMaxFps`       | `60`                            | Upper bound for GPU texture uploads per second, `0` = unlimited.                                                                                                                                                                                                                                   |
@@ -241,6 +255,14 @@ it while paused means it cannot be heard, and afterwards both run in real time f
 remaining difference is the audio output's own re-fill after such a seek - tens of milliseconds, constant
 rather than growing - and `video.audioDelayMs` shifts the sound by a fixed amount on top of it if that is not
 enough. With the default (one player for both streams) all of this is moot: there is one clock.
+
+While playing, the two clocks are also watched: if the sound holds a gap of more than ~250 ms behind the
+picture (or ~750 ms ahead of it) for longer than a hiccup, it is seeked onto the picture's position. This
+closes the one failure mode the open-loop design had: the first launches of a heavy modpack stall every
+thread for seconds at a time (JIT, cold caches, native library extraction), and whatever stalled used to
+stay behind for the rest of the playback - heard as the sound lagging the picture terribly. The clock
+itself is also sanitised: the device's reported position is clamped to what has actually been written and
+never allowed to move backwards, so a bogus report around an underrun cannot send the picture racing.
 
 With `debugLogging: true` a heartbeat is logged every 5 s while a video is on screen (frame counters, alpha,
 positions, scene flags). It exists so that a stalled scene is visible in the log: a freeze that leaves no
@@ -355,11 +377,13 @@ Playing one VP9 clip needs a fraction of that - which is what the **custom minim
 
 `.github/workflows/ffmpeg.yml` builds a minimal FFmpeg (`--disable-everything`, only the Matroska
 demuxer, VP9/Opus decoders and parsers, the file protocol, swscale and swresample - no encoders, no
-network) **with VP9 hardware decoding included** (VAAPI + NVDEC on Linux, D3D11VA/DXVA2 on
-Windows, VideoToolbox on macOS) for all five platforms: Linux x86-64 and ARM64 natively/cross-compiled
-on Ubuntu, Windows x86-64 through mingw-w64 on Ubuntu, and macOS through the native GitHub runners. The
-downloaded tarball and the build outputs are cached, and the zips are uploaded as workflow artifacts
-(kept 90 days). The workflow is **manual-only** (`workflow_dispatch`) - the libraries rarely change.
+network) **with VP9 hardware decoding included** (VAAPI on Linux - plus NVDEC on x86-64 -
+D3D11VA/DXVA2 on Windows, VideoToolbox on macOS) for all five platforms: Linux x86-64 natively and
+ARM64 cross-compiled on Ubuntu, Windows x86-64 through mingw-w64 on Ubuntu, and macOS ARM64
+natively plus x86-64 cross-compiled on the Apple Silicon runner. The downloaded tarball and the
+build outputs are cached, and the staged libraries are uploaded as workflow artifacts (kept 90
+days) - GitHub packs an artifact download into exactly the zip that gets committed. The workflow
+is **manual-only** (`workflow_dispatch`) - the libraries rarely change.
 
 Because the minimal build is made from the **same FFmpeg release** the JavaCPP preset targets, the
 public ABI is identical and bytedeco's JNI wrappers work against it unchanged - only the fat codec

@@ -78,6 +78,7 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     private static final Logger LOGGER = LoggerFactory.getLogger("Titlescreen/Video");
 
     /** {@code EAGAIN} as FFmpeg reports it (the negated errno); EAGAIN is 11 on all three OSes. */
+
     private static final int AVERROR_EAGAIN = -11;
     /** Decoder threading modes (FFmpeg's FF_THREAD_FRAME/FF_THREAD_SLICE macros). */
     private static final int FF_THREAD_FRAME = 1;
@@ -89,6 +90,22 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
      * milliseconds - every millisecond of lead is a millisecond the sound lags behind).
      */
     private static final double MAX_VIDEO_LEAD_MS = 60.0;
+
+    /**
+     * How far ahead of the audible clock the demuxed audio has to be before the picture's pacing
+     * may stall the demuxer. The picture is paced against the *audible* position, so without this
+     * the demuxer never reads further ahead than the picture's lead and the audio output runs on
+     * an empty buffer: it underruns at the first stutter and the sound cuts out. Measured as
+     * stream time between the newest queued audio and the clock - the whole pipeline's depth,
+     * wherever the buffering happens to sit.
+     */
+    private static final long AUDIO_CUSHION_MS = 400L;
+
+    /**
+     * How long the audio clock may sit still while unpaused before the picture stops waiting for
+     * it: a blocked audio thread (an output wedged in its native call) must not freeze the video.
+     */
+    private static final long AUDIO_CLOCK_STALE_NANOS = 600_000_000L;
 
     public FfmpegVideoPlayer() {
         this(Mode.VIDEO);
@@ -143,13 +160,27 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     private volatile long audioClockMs = -1L;
     /** Whether {@link #audioClockMs} reflects a real position (the sound's, or a seek target). */
     private volatile boolean audioClockValid;
+    /** When {@link #audioClockMs} last advanced - drives the stale-audio fallback in {@link #clockMs}. */
+    private volatile long audioClockStampNanos;
 
     // Audio clock bookkeeping (audio thread): the clock is the *audible* position - what the
     // device has played - read off the line's media time and mapped onto the stream's timestamps.
     private long audioAnchorUs = Long.MIN_VALUE;
     private double audioAnchorPtsMs;
+    /** Bytes handed to the line since the clock anchor; bounds how far the media position may be. */
+    private long audioWrittenBytes;
+    private long audioAnchorWrittenBytes;
+    /** The media position never runs backwards; a reported regression is held instead of applied. */
+    private long audioMediaUsFloor = Long.MIN_VALUE;
     /** Bumped on every seek; a chunk written across a seek must not update the clock. */
     private volatile int audioSeekGeneration;
+    /** After a seek: decoded sound before this stream position is dropped (the demuxer restarts at the nearest keyframe, which can sit before the target). */
+    private volatile long skipAudioUntilMs = -1L;
+    /** The newest queued audio's stream position, and when it was queued - the cushion measure. */
+    private volatile long lastAudioQueuedPtsMs = Long.MIN_VALUE;
+    private volatile long lastAudioQueueNanos;
+    /** Output mixer name for the sound, or empty for automatic selection (see {@link AudioOutput}). */
+    private volatile String audioDevice = "";
 
     private Thread decodeThread;
     private Thread audioThread;
@@ -200,6 +231,10 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     private long anchorNanos;
     private long pausedAtNanos;
     private long clockOffsetMs;
+    /** Whether {@link #audioClockMs} paces the picture; untrustworthy outputs run on wall time. */
+    private volatile boolean useAudioClock;
+    /** The playback clock never steps backwards between seeks (see {@link #clockMs}). */
+    private long clockFloorMs = Long.MIN_VALUE;
     private long lastVideoPtsMs = -1L;
     private long skipFramesUntilMs = -1L;
     private boolean singleFrameAfterSeek;
@@ -290,10 +325,12 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
             // The line is opened here, before playback: an output that already exists only has to
             // be fed, which keeps the sound a hair behind the picture at worst instead of seconds
             // (the audio preload runs silently at volume 0 until it is turned up).
-            this.audioOutput = AudioOutput.open(file, audioRate, audioChannels, this.volume, this.debug);
+            this.audioOutput = AudioOutput.open(file, audioRate, audioChannels, this.volume, this.debug,
+                    this.audioDevice);
             if (this.audioOutput != null) {
                 this.audioOutRate = this.audioOutput.rate();
                 this.audioOutChannels = this.audioOutput.channels();
+                this.useAudioClock = this.audioOutput.positionTrustworthy();
             }
         }
 
@@ -310,10 +347,22 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
 
         this.decodeThread = new Thread(this::decodeLoop, "Titlescreen-FFmpeg-Decode");
         this.decodeThread.setDaemon(true);
+        // Best effort, but it matters on the heavy first launches: the picture may drop frames by
+        // design, the sound must not be starved by the video pipeline when the machine is loaded.
+        try {
+            this.decodeThread.setPriority(Thread.NORM_PRIORITY - 1);
+        } catch (Throwable ignored) {
+            // Priority adjustments are a hint, never a requirement.
+        }
         this.decodeThread.start();
         if (this.audioOutput != null) {
             this.audioThread = new Thread(this::audioLoop, "Titlescreen-FFmpeg-Audio");
             this.audioThread.setDaemon(true);
+            try {
+                this.audioThread.setPriority(Thread.NORM_PRIORITY + 1);
+            } catch (Throwable ignored) {
+                // Priority adjustments are a hint, never a requirement.
+            }
             this.audioThread.start();
         }
         return !this.closed;
@@ -522,9 +571,12 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
                     this.singleFrameAfterSeek = false;
                 }
                 if (this.lastVideoPtsMs >= 0L
-                        && this.lastVideoPtsMs + this.frameDurationMs - clockMs() > MAX_VIDEO_LEAD_MS) {
+                        && this.lastVideoPtsMs + this.frameDurationMs - clockMs() > MAX_VIDEO_LEAD_MS
+                        && audioCushionSufficient()) {
                     // Paced: stay a few frames ahead of the clock at most, so the picture can
-                    // never run away from the sound.
+                    // never run away from the sound - but only once the sound has its cushion
+                    // too, otherwise the demuxer would never read further than the picture's
+                    // lead and the audio output would starve behind it.
                     sleepUnchecked(5);
                     continue;
                 }
@@ -550,6 +602,23 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
             LOGGER.warn("Decoding crashed for {}", this.file, t);
             this.finished = true;
         }
+    }
+
+    /**
+     * Whether the audio pipeline holds enough stream time to ride out a decode hiccup: the newest
+     * queued audio has to lead the audible clock by {@link #AUDIO_CUSHION_MS}. Players without
+     * audio always count as cushioned, and so does a track that stopped delivering packets (it
+     * ended - nothing left to protect, the picture must not be dropped for its sake).
+     */
+    private boolean audioCushionSufficient() {
+        if (this.audioOutput == null || this.audioCodecContext == null) {
+            return true;
+        }
+        if (this.lastAudioQueueNanos == 0L
+                || System.nanoTime() - this.lastAudioQueueNanos > 2_000_000_000L) {
+            return true;
+        }
+        return this.lastAudioQueuedPtsMs - clockMs() >= AUDIO_CUSHION_MS;
     }
 
     private void decodeVideoPacket() {
@@ -590,6 +659,18 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
                 if (source != this.frame) {
                     avutil.av_frame_unref(this.swFrame);
                 }
+                continue;
+            }
+            if (ptsMs - clockMs() > MAX_VIDEO_LEAD_MS && !audioCushionSufficient()) {
+                // Far ahead of the clock only because the sound is being fed its cushion: decode
+                // (VP9 needs every frame as a reference) but skip the conversion and the
+                // presentation. The picture drops these frames the same way it drops late frames
+                // behind a slow decoder - a fraction of a second of skipped video instead of a
+                // sound that cuts out.
+                if (source != this.frame) {
+                    avutil.av_frame_unref(this.swFrame);
+                }
+                this.lastVideoPtsMs = (long) ptsMs;
                 continue;
             }
             presentFrame(source, ptsMs);
@@ -745,6 +826,12 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
 
         long pts = this.frame.pts();
         long ptsMs = pts == avutil.AV_NOPTS_VALUE ? -1L : Math.round(pts * this.audioTimeBaseMs);
+        if (ptsMs >= 0 && ptsMs < this.skipAudioUntilMs) {
+            // Stale samples from before a seek: the demuxer restarts at the nearest keyframe, which
+            // can sit well before the seek target. Playing them would replay a snippet of the clip
+            // (audible after every seek, and it made resync seeks never converge).
+            return;
+        }
         long durationMs = Math.round(converted * 1000.0 / this.audioOutRate);
 
         // The configured audio delay only ever lines a separate audio-only player up with another
@@ -769,6 +856,10 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
             this.pendingStartSilence = false;
         }
         enqueue(new PcmChunk(chunk, ptsMs, durationMs));
+        if (ptsMs >= 0L) {
+            this.lastAudioQueuedPtsMs = ptsMs;
+        }
+        this.lastAudioQueueNanos = System.nanoTime();
         this.firstFrameSeen = true;
     }
 
@@ -847,6 +938,7 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
                 this.audioAnchorUs = Long.MIN_VALUE;
                 continue;
             }
+            this.audioWrittenBytes += data.length;
             if (chunk.ptsMs() >= 0) {
                 // The clock is what is audible right now: the line's media time (what the device
                 // has played) mapped onto the stream's timestamps at the anchor chunk. Scheduling
@@ -856,10 +948,33 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
                 if (this.audioAnchorUs == Long.MIN_VALUE) {
                     this.audioAnchorUs = mediaUs;
                     this.audioAnchorPtsMs = chunk.ptsMs();
+                    this.audioAnchorWrittenBytes = this.audioWrittenBytes;
+                    this.audioMediaUsFloor = mediaUs;
                 }
+                // The device's position is derived from buffer availability and can be briefly
+                // wrong around underruns and sound-server round trips. Real playback never runs
+                // backwards and can never have played more than was written since the anchor:
+                // clamping both ways keeps a bogus report from leaping the clock forward (which
+                // the picture would chase, racing ahead of an audibly lagging sound).
+                long writtenUs = this.audioAnchorUs
+                        + (this.audioWrittenBytes - this.audioAnchorWrittenBytes) * 500_000L
+                            / Math.max(1, this.audioOutRate * Math.max(1, this.audioOutChannels));
+                if (mediaUs > writtenUs) {
+                    mediaUs = writtenUs;
+                }
+                if (mediaUs < this.audioMediaUsFloor) {
+                    mediaUs = this.audioMediaUsFloor;
+                }
+                this.audioMediaUsFloor = mediaUs;
                 this.audioClockMs = Math.round(this.audioAnchorPtsMs
                         + (mediaUs - this.audioAnchorUs) / 1000.0);
                 this.audioClockValid = true;
+                this.audioClockStampNanos = System.nanoTime();
+                if (this.mode == Mode.AUDIO) {
+                    // The audio-only player has no decode-side position: its cached time is the clock.
+                    // (A video player's cached time stays the decode thread's picture position.)
+                    this.cachedTimeMs = this.audioClockMs;
+                }
             }
             debugAvSync();
         }
@@ -908,14 +1023,19 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         this.audioAnchorUs = Long.MIN_VALUE;
         this.audioClockMs = targetMs;
         this.audioClockValid = true; // approximate at the seek target until the sound is audible again
+        this.audioClockStampNanos = System.nanoTime(); // grace period for the sound to re-prime
         this.finished = false;
         this.lastVideoPtsMs = -1L;
         this.skipFramesUntilMs = targetMs;
+        // The demuxer restarts at the nearest keyframe, which can sit before the target: decoded
+        // sound older than the target is dropped (see queueAudioFrame) instead of replayed.
+        this.skipAudioUntilMs = targetMs;
         this.audioClockMs = targetMs;
         this.cachedTimeMs = targetMs;
         this.pendingStartSilence = this.audioDelayMs < 0;
         this.clockOffsetMs = targetMs;
         this.anchorNanos = System.nanoTime();
+        this.clockFloorMs = Long.MIN_VALUE; // a seek may legitimately move the clock backwards
         this.singleFrameAfterSeek = this.paused && this.videoCodecContext != null;
     }
 
@@ -926,10 +1046,28 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
      * sound by everything still sitting in the audio output's buffer.
      */
     private long clockMs() {
-        if (this.audioClockValid) {
-            return this.audioClockMs;
+        long value;
+        if (this.useAudioClock && this.audioClockValid) {
+            long frozenForNanos = System.nanoTime() - this.audioClockStampNanos;
+            if (this.paused || frozenForNanos < AUDIO_CLOCK_STALE_NANOS) {
+                value = this.audioClockMs;
+            } else {
+                // The audio clock stopped advancing while playback runs - its thread is blocked in
+                // the output - so the picture would freeze with it. Keep moving from the last audible
+                // position instead: a stalled sound must never stall the scene (the video then drops
+                // the frames it missed, exactly as it does behind a slow decoder).
+                value = this.audioClockMs + frozenForNanos / 1_000_000L;
+            }
+        } else {
+            // Wall time: the master clock every player uses. The sound follows as well as the
+            // output plays it; the picture never freezes, races or slows with a misbehaving one.
+            value = this.clockOffsetMs + (System.nanoTime() - this.anchorNanos) / 1_000_000L;
         }
-        return this.clockOffsetMs + (System.nanoTime() - this.anchorNanos) / 1_000_000L;
+        // Monotonic between seeks: a step backwards would freeze the picture until it catches up.
+        if (value > this.clockFloorMs) {
+            this.clockFloorMs = value;
+        }
+        return this.clockFloorMs;
     }
 
     // ------------------------------------------------------------------
@@ -1021,6 +1159,11 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
             this.audioDelayMs = delayMs;
             this.pendingStartSilence = delayMs < 0L;
         }
+    }
+
+    @Override
+    public void setAudioDevice(String device) {
+        this.audioDevice = device == null ? "" : device;
     }
 
     @Override

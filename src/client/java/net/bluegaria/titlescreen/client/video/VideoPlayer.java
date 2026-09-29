@@ -73,6 +73,17 @@ public interface VideoPlayer {
     }
 
     /**
+     * Names the output device the video's sound should play through. On Linux - where the sound
+     * goes through the system sound server, like the game's own sound - this is a sink name as
+     * shown by the desktop's audio widget (e.g. {@code WH-CH520}); where Java Sound is used
+     * instead, it is a mixer name from
+     * {@link javax.sound.sampled.AudioSystem#getMixerInfo()}. Empty or unknown names follow the
+     * system's default output. Must be called before {@link #start}.
+     */
+    default void setAudioDevice(String device) {
+    }
+
+    /**
      * Opens the file and decodes the first frame, then waits paused. Used so that the loading
      * screen background can be on screen the instant the loading screen appears.
      */

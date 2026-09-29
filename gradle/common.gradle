@@ -77,9 +77,10 @@ repositories {
 // The FFmpeg platforms bundled with the mod (prebuilt libraries from the JavaCPP presets).
 def ffmpegPlatforms = ['windows-x86_64', 'linux-x86_64', 'linux-arm64', 'macosx-x86_64', 'macosx-arm64']
 
-// Folder with the committed minimal FFmpeg libraries (see gradle.properties): the zips the
-// ffmpeg.yml workflow uploads, downloaded from a workflow run's Artifacts by hand and committed
-// at gradle/ffmpeg/libraries/. Resolved per platform in the trim tasks below.
+// Folder with the committed minimal FFmpeg libraries (see gradle.properties): the artifact zips
+// (GitHub packs them around the loose libraries the ffmpeg.yml workflow uploads), downloaded from
+// a workflow run's Artifacts by hand and committed at gradle/ffmpeg/libraries/. Resolved per
+// platform in the trim tasks below.
 def ffmpegLibsDir = (project.findProperty('ffmpeg_libraries') ?: '') as String
 
 // The player only uses avutil/avcodec/avformat/swresample/swscale - avdevice, avfilter and the
@@ -220,9 +221,9 @@ dependencies {
         modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
         modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 
-        // Cloth Config - in-game config screen (bundled so users do not have to install it themselves)
+        // Cloth Config - in-game config screen (external dependency, deliberately NOT bundled:
+        // users install it themselves - compile-time and dev-runtime only)
         modImplementation "maven.modrinth:cloth-config:${project.cloth_config_version}"
-        include "maven.modrinth:cloth-config:${project.cloth_config_version}"
 
         // Mod Menu - optional integration, deliberately NOT bundled
         modImplementation "maven.modrinth:modmenu:${project.modmenu_version}"
@@ -234,9 +235,9 @@ dependencies {
         implementation "net.fabricmc:fabric-loader:${project.loader_version}"
         implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 
-        // Cloth Config - in-game config screen (bundled so users do not have to install it themselves)
+        // Cloth Config - in-game config screen (external dependency, deliberately NOT bundled:
+        // users install it themselves - compile-time and dev-runtime only)
         implementation "maven.modrinth:cloth-config:${project.cloth_config_version}"
-        include "maven.modrinth:cloth-config:${project.cloth_config_version}"
 
         // Mod Menu - optional integration, deliberately NOT bundled
         implementation "maven.modrinth:modmenu:${project.modmenu_version}"

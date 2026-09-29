@@ -30,15 +30,20 @@ jobs:
             packages: 'libva-dev' # VAAPI decode; NVDEC headers are installed below
           - platform: linux-arm64
             os: ubuntu-24.04
-            packages: crossbuild-essential-arm64
+            # libva-dev:arm64 is what the VAAPI hardware acceleration cross-links against
+            # (build-minimal.sh points pkg-config at the arm64 .pc files).
+            packages: 'crossbuild-essential-arm64 libva-dev:arm64'
           - platform: windows-x86_64
             os: ubuntu-24.04
             packages: gcc-mingw-w64-x86-64
           - platform: macosx-arm64
             os: macos-14
             packages: ''
+          # Cross-compiled on the Apple Silicon image: build-minimal.sh passes Apple clang the
+          # x86_64 -arch flags, because GitHub's Intel (macos-13) runners are being retired and
+          # spend forever queued. nasm (an arm64 binary there) still assembles the x86_64 asm.
           - platform: macosx-x86_64
-            os: macos-13
+            os: macos-14
             packages: nasm
     steps:
       - uses: actions/checkout@v5
@@ -48,6 +53,9 @@ jobs:
           if [ "$RUNNER_OS" = "macOS" ]; then
             if [ -n "${{ matrix.packages }}" ]; then brew install ${{ matrix.packages }}; fi
           else
+            # Foreign-arch packages (linux-arm64's libva-dev:arm64) need the architecture
+            # registered before the update pulls in its package indexes.
+            case "${{ matrix.packages }}" in *:arm64*) sudo dpkg --add-architecture arm64;; esac
             sudo apt-get update
             sudo apt-get install -y nasm ${{ matrix.packages }}
           fi
@@ -82,12 +90,14 @@ jobs:
           key: ffmpeg-min-${{ env.FFMPEG_VERSION }}-${{ matrix.platform }}-${{ hashFiles('gradle/ffmpeg/build-minimal.sh') }}
 
       - name: Build
-        # Also rebuild when a restored cache lacks the expected zip (for example
+        # Also rebuild when a restored cache lacks the staged libraries (for example
         # one saved by an older run) instead of failing later at the upload step.
-        if: success() && (steps.build-cache.outputs.cache-hit != 'true' || hashFiles(format('out/ffmpeg-{0}-min-{1}.zip', env.FFMPEG_VERSION, matrix.platform)) == '')
+        if: success() && (steps.build-cache.outputs.cache-hit != 'true' || hashFiles(format('out/stage-{0}/*', matrix.platform)) == '')
         run: bash gradle/ffmpeg/build-minimal.sh ${{ matrix.platform }}
         env:
           FFMPEG_VERSION: ${{ env.FFMPEG_VERSION }}
+          # No zip from the script: GitHub wraps the uploaded files into one on download.
+          FFMPEG_NO_ZIP: '1'
 
       # Explicit save (instead of the implicit post step of actions/cache) so a
       # failed build never caches a partial out/ directory.
@@ -101,10 +111,11 @@ jobs:
       - name: Upload build artifact (kept 90 days)
         uses: actions/upload-artifact@v6
         with:
+          # The five libraries are uploaded loose; the artifact name becomes the name of the zip
+          # GitHub packs around them on download (ffmpeg-<version>-min-<platform>.zip - the name
+          # the Gradle build matches - with the libraries at the zip root). Download it from this
+          # run's Artifacts and commit it unchanged into gradle/ffmpeg/libraries/.
           name: ffmpeg-${{ env.FFMPEG_VERSION }}-min-${{ matrix.platform }}
-          # Must match the zip name build-minimal.sh produces: ffmpeg-<version>-min-<platform>.zip.
-          # Download it from this run's Artifacts and commit it unchanged into
-          # gradle/ffmpeg/libraries/ - the Gradle build bundles it from there.
-          path: out/ffmpeg-${{ env.FFMPEG_VERSION }}-min-${{ matrix.platform }}.zip
+          path: out/stage-${{ matrix.platform }}
           retention-days: 90
           if-no-files-found: error

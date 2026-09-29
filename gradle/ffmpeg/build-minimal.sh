@@ -4,13 +4,15 @@
 # Usage: build-minimal.sh <platform>
 #   platform: linux-x86_64 | linux-arm64 | windows-x86_64 | macosx-arm64 | macosx-x86_64
 #
-# Produces out/ffmpeg-<version>-min-<platform>.zip containing the five libraries with the exact
-# file names the JavaCPP preset expects (identical to the bytedeco builds' names, since the same
-# FFmpeg release is built - only with everything the player never touches disabled: Matroska/WebM
-# demuxing, VP9 + Opus decoding, VP9-only hardware acceleration and the swscale/swresample
-# converters). The zip is
-# consumed by the Gradle build via the ffmpeg_libraries property; the GitHub Actions workflow
-# (.github/workflows/ffmpeg.yml) runs this script for all five platforms.
+# Stages the five libraries under out/stage-<platform>/ with the exact file names the JavaCPP
+# preset expects (identical to the bytedeco builds' names, since the same FFmpeg release is built
+# - only with everything the player never touches disabled: Matroska/WebM demuxing, VP9 + Opus
+# decoding, VP9-only hardware acceleration and the swscale/swresample converters) and packs them
+# into out/ffmpeg-<version>-min-<platform>.zip, the file the Gradle build consumes via the
+# ffmpeg_libraries property. Set FFMPEG_NO_ZIP=1 to keep only the staged files: the GitHub
+# Actions workflow (.github/workflows/ffmpeg.yml), which runs this script for all five platforms,
+# does that because GitHub zips uploaded artifacts itself - its artifact download already is the
+# zip to commit, with the five libraries at the root.
 #
 # Extra configure arguments can be appended through the EXTRA_CONFIGURE environment variable
 # (for example EXTRA_CONFIGURE="--disable-x86asm" for a quick functional build without nasm).
@@ -49,7 +51,22 @@ case "$PLATFORM" in
   linux-arm64)
     CROSS=(--enable-cross-compile --cross-prefix=aarch64-linux-gnu- --arch=aarch64 --target-os=linux)
     LIBS=("${LINUX_LIBS[@]}")
-    HWACCEL=()
+    # VAAPI like on x86_64: VAAPI (and CUDA, which has no ARM SBC counterpart) is what the player
+    # tries on Linux, and Mesa ships VAAPI drivers for the SoCs that can run the game (RK3588 &
+    # friends). Unlike NVDEC, VAAPI is a link-time dependency, so the build needs the arm64
+    # libva: `sudo dpkg --add-architecture arm64 && sudo apt-get install libva-dev:arm64`, with
+    # pkg-config pointed at the arm64 .pc files (done below). The kernel V4L2 m2m decoders are
+    # no alternative here: the player opens the plain vp9 decoder, and v4l2m2m is a separate
+    # decoder it would never pick. Set FFMPEG_NO_HWACCEL=1 for a software-only build without
+    # those dependencies.
+    if [ "${FFMPEG_NO_HWACCEL:-0}" != 1 ]; then
+      # The plain pkg-config must not see the host's amd64 libva.pc; overridable for other
+      # distro layouts.
+      export PKG_CONFIG_LIBDIR="${PKG_CONFIG_LIBDIR:-/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig:/usr/lib/pkgconfig}"
+      HWACCEL=(--enable-vaapi --enable-hwaccel=vp9_vaapi)
+    else
+      HWACCEL=()
+    fi
     ;;
   windows-x86_64)
     # w32threads (the mingw default) keep the DLLs free of a libwinpthread dependency;
@@ -60,9 +77,21 @@ case "$PLATFORM" in
       --enable-hwaccel=vp9_d3d11va --enable-hwaccel=vp9_d3d11va2 --enable-hwaccel=vp9_dxva2)
     ;;
   macosx-arm64|macosx-x86_64)
-    CROSS=()
     LIBS=("${MACOS_LIBS[@]}")
     HWACCEL=(--enable-videotoolbox --enable-hwaccel=vp9_videotoolbox)
+    # x86_64 dylibs are cross-compiled on an Apple Silicon host (GitHub is retiring its Intel
+    # runners). Apple's toolchain is itself a cross compiler: one -arch for the compiler and one
+    # for the linker turn the otherwise native build into an Intel one, while --enable-cross-
+    # compile only switches configure to compile/link-only probes, so it never has to run the
+    # x86_64 test binaries it builds (the arm64 host would need Rosetta for that). nasm
+    # assembles x86_64 objects whatever architecture it runs on, and the
+    # install_name_tool/otool/codesign pass below handles any slice.
+    if [ "$PLATFORM" = macosx-x86_64 ]; then
+      CROSS=(--enable-cross-compile --arch=x86_64 --target-os=darwin
+        '--extra-cflags=-arch x86_64' '--extra-ldflags=-arch x86_64')
+    else
+      CROSS=()
+    fi
     ;;
   *)
     echo "unknown platform: $PLATFORM" >&2
@@ -142,8 +171,16 @@ if [[ "$PLATFORM" == macosx-* ]]; then
   done
 fi
 
-ZIP_PATH="$REPO_ROOT/$OUT_DIR/ffmpeg-$FFMPEG_VERSION-min-$PLATFORM.zip"
-rm -f "$ZIP_PATH"
-(cd "$STAGE" && zip -q -r "$ZIP_PATH" .)
-echo "Built $ZIP_PATH:"
-unzip -l "$ZIP_PATH"
+if [ "${FFMPEG_NO_ZIP:-0}" = 1 ]; then
+  # For the workflow: it uploads the staged files directly, because GitHub zips artifacts itself
+  # on download. That zip is named after the artifact (ffmpeg-<version>-min-<platform>.zip, the
+  # name the Gradle build matches) with the libraries at its root - no zip inside the zip.
+  echo "Staged the libraries for $PLATFORM in $STAGE (FFMPEG_NO_ZIP=1 - no zip created):"
+  ls -l "$STAGE"
+else
+  ZIP_PATH="$REPO_ROOT/$OUT_DIR/ffmpeg-$FFMPEG_VERSION-min-$PLATFORM.zip"
+  rm -f "$ZIP_PATH"
+  (cd "$STAGE" && zip -q -r "$ZIP_PATH" .)
+  echo "Built $ZIP_PATH:"
+  unzip -l "$ZIP_PATH"
+fi

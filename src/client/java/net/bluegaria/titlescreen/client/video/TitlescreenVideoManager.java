@@ -46,6 +46,19 @@ public final class TitlescreenVideoManager {
 
     /** How many times starting the intro video is retried after a failed attempt. */
     private static final int MAX_SESSION_START_ATTEMPTS = 3;
+
+    /**
+     * How far the separate sound player may trail the picture before it is seeked back on: beyond
+     * lip-sync noise, but far below the seconds-long gaps a stalled first launch used to leave.
+     */
+    private static final long AUDIO_RESYNC_LAG_MS = 250L;
+    /** How far the sound may run ahead of the picture before it is pulled back (much rarer). */
+    private static final long AUDIO_RESYNC_LEAD_MS = 750L;
+    /** The gap must persist this long first - a transient hitch heals on its own. */
+    private static final long AUDIO_RESYNC_PERSIST_MS = 400L;
+    /** Minimum time between resync seeks, so a stuttering machine cannot machine-gun the decoder. */
+    private static final long AUDIO_RESYNC_COOLDOWN_MS = 1500L;
+
     private static final TitlescreenVideoManager INSTANCE = new TitlescreenVideoManager();
 
     private VideoPlayer player = new FfmpegVideoPlayer();
@@ -60,6 +73,15 @@ public final class TitlescreenVideoManager {
      * sound will not.</p>
      */
     private VideoPlayer audioPlayer = FfmpegVideoPlayer.audioOnly();
+
+    // Closed-loop audio resync state (client tick): the gap between the picture and the sound of a
+    // baked video played by two separate players. See resyncAudioToPicture.
+    private long audioResyncSinceMs = -1L;
+    private long lastAudioResyncMs = -1L;
+    private long lastSoundProbeMs = Long.MIN_VALUE;
+    private long lastSoundAdvanceMs;
+    private long lastPictureProbeMs = Long.MIN_VALUE;
+    private long lastPictureAdvanceMs;
 
     private final VideoTextureLayer introTexture =
             new VideoTextureLayer("titlescreen", "video_frame", "Titlescreen intro video");
@@ -249,6 +271,8 @@ public final class TitlescreenVideoManager {
             this.audioPlayer.seekMs(0L);
         }
 
+        resyncAudioToPicture(cfg);
+
         // A failed start is usually a moment of native start-up contention; giving up for the whole
         // session would mean no intro video at all, so retry a couple of times.
         if (this.failed && this.sessionStartFailures < MAX_SESSION_START_ATTEMPTS
@@ -346,6 +370,73 @@ public final class TitlescreenVideoManager {
         if (currentScreen != null && !(currentScreen instanceof TitleScreen)) {
             stopSession(minecraft);
         }
+    }
+
+    /**
+     * Keeps a baked video's separate sound player on the picture's timeline.
+     *
+     * <p>The picture player is scheduled against the wall clock and recovers from a stall by
+     * catching up, while the sound plays on the audio device's own clock and simply continues from
+     * wherever it was: after any long stall of the audio side (the first launches of a heavy
+     * modpack - JIT, cold caches, native library extraction stall every thread for seconds at a
+     * time) the sound stays behind the picture for the rest of the playback, because nothing
+     * pulled the two open-loop clocks together. When the gap holds beyond lip-sync noise for a
+     * moment, the sound is seeked to where the picture is; the seek flushes and re-primes it at
+     * the right spot. Gated on both sides actually moving, so holds, pauses and ends never
+     * trigger it.</p>
+     */
+    private void resyncAudioToPicture(TitlescreenConfig cfg) {
+        if (!usesSeparateAudioPlayer(cfg)
+                || (!this.backgroundActive && !this.sessionActive)) {
+            this.audioResyncSinceMs = -1L;
+            return;
+        }
+        long now = Util.getMillis();
+        long pictureMs = this.player.cachedTimeMs();
+        long soundMs = this.audioPlayer.cachedTimeMs();
+        if (pictureMs < 0L || soundMs < 0L || this.backgroundFrozen || this.ended) {
+            this.audioResyncSinceMs = -1L;
+            this.lastSoundProbeMs = Long.MIN_VALUE;
+            this.lastPictureProbeMs = Long.MIN_VALUE;
+            return;
+        }
+        // Only correct while both sides actually move: a paused, held or ended stream makes any
+        // gap a fact of the scene rather than a drift to repair.
+        if (soundMs != this.lastSoundProbeMs) {
+            this.lastSoundProbeMs = soundMs;
+            this.lastSoundAdvanceMs = now;
+        } else if (now - this.lastSoundAdvanceMs > 2000L) {
+            this.audioResyncSinceMs = -1L;
+            return;
+        }
+        if (pictureMs != this.lastPictureProbeMs) {
+            this.lastPictureProbeMs = pictureMs;
+            this.lastPictureAdvanceMs = now;
+        } else if (now - this.lastPictureAdvanceMs > 2000L) {
+            this.audioResyncSinceMs = -1L;
+            return;
+        }
+        long lag = pictureMs - soundMs;
+        boolean beyond = lag > AUDIO_RESYNC_LAG_MS || -lag > AUDIO_RESYNC_LEAD_MS;
+        if (!beyond) {
+            this.audioResyncSinceMs = -1L;
+            return;
+        }
+        if (this.audioResyncSinceMs < 0L) {
+            this.audioResyncSinceMs = now;
+            return;
+        }
+        if (now - this.audioResyncSinceMs < AUDIO_RESYNC_PERSIST_MS
+                || (this.lastAudioResyncMs > 0L && now - this.lastAudioResyncMs < AUDIO_RESYNC_COOLDOWN_MS)) {
+            return;
+        }
+        this.lastAudioResyncMs = now;
+        this.audioResyncSinceMs = -1L;
+        if (cfg.general.debugLogging) {
+            LOGGER.info("The sound ran {} ms {} the picture - seeking it to {} ms to resync",
+                    Math.abs(lag), lag > 0L ? "behind" : "ahead of", pictureMs);
+        }
+        this.audioPlayer.seekMs(Math.max(0L, pictureMs));
     }
 
     // ------------------------------------------------------------------
@@ -464,12 +555,14 @@ public final class TitlescreenVideoManager {
         Thread thread = new Thread(() -> {
             this.backgroundPlayer.setDebugLogging(cfg.general.debugLogging);
             this.backgroundPlayer.setHardwareDecoding(cfg.video.hardwareDecoding);
+            this.backgroundPlayer.setAudioDevice(cfg.video.videoAudioDevice);
             // Volume 0: the preload decodes the first frame while the game is still starting up, and
             // playing the audio there would be heard long before anything is on screen.
             boolean ok = this.backgroundPlayer.preload(path, 0);
             if (usesSeparateAudioPlayer(cfg)) {
                 // Silent again (volume 0) and paused on its first samples, so it cannot run ahead of the
                 // loading scene that will play it either.
+                this.audioPlayer.setAudioDevice(cfg.video.videoAudioDevice);
                 this.audioPlayer.preload(path, 0);
             }
             synchronized (this) {
@@ -557,8 +650,10 @@ public final class TitlescreenVideoManager {
         Thread thread = new Thread(() -> {
             this.backgroundPlayer.setDebugLogging(cfg.general.debugLogging);
             this.backgroundPlayer.setHardwareDecoding(cfg.video.hardwareDecoding);
+            this.backgroundPlayer.setAudioDevice(cfg.video.videoAudioDevice);
             boolean ok = this.backgroundPlayer.start(path, loadingVolume(cfg));
             if (ok && usesSeparateAudioPlayer(cfg)) {
+                this.audioPlayer.setAudioDevice(cfg.video.videoAudioDevice);
                 this.audioPlayer.start(path, loadingVolume(cfg));
             }
             if (this.backgroundGeneration != generation) {
@@ -825,10 +920,12 @@ public final class TitlescreenVideoManager {
         Thread thread = new Thread(() -> {
             this.player.setDebugLogging(cfg.general.debugLogging);
             this.player.setHardwareDecoding(cfg.video.hardwareDecoding);
+            this.player.setAudioDevice(cfg.video.videoAudioDevice);
             boolean ok = this.player.start(path, cfg.video.videoVolume);
             if (usesSeparateAudioPlayer(cfg)) {
                 // Reached when a baked video is retried (normally its sound is already playing): restart it
                 // with the video so both stay together.
+                this.audioPlayer.setAudioDevice(cfg.video.videoAudioDevice);
                 this.audioPlayer.start(path, cfg.video.videoVolume);
                 this.audioPlayer.setAudioDelayMs(cfg.video.audioDelayMs);
             }

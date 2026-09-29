@@ -7,10 +7,10 @@ This folder holds the minimal FFmpeg builds the mod bundles instead of the byted
 To (re)populate it:
 
 1. Run the **Build minimal FFmpeg** workflow from the repository's Actions tab (it is
-   manual-only; the libraries rarely change). NOTE: GitHub puts artifacts into a zip, so
-   the downloaded zips have the actual zips inside them. Extract them, zip-ception.
+   manual-only; the libraries rarely change).
 2. Download the five `ffmpeg-<version>-min-<platform>.zip` files from the finished run's
-   Artifacts section (each artifact contains exactly one zip).
+   Artifacts section. The artifacts hold the libraries loose; GitHub packs each download
+   into that zip itself, so it is ready to commit - no zip inside the zip to extract.
 3. Drop the zips into this folder and commit them.
 
 The Gradle build picks the zips up through the `ffmpeg_libraries` property in
