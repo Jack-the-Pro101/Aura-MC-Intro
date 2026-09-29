@@ -11,10 +11,12 @@ import java.nio.ByteBuffer;
 /**
  * Bridges the decoder's frame-producing thread with the render thread.
  *
- * <p>The decoder writes a whole RGBA frame (top-down) into one of two staging buffers and publishes it; the
+ * <p>The decoder converts each frame directly into one of three staging buffers and publishes it; the
  * render thread copies the newest published frame straight into the texture's {@link NativeImage} and
- * uploads it. Frames produced while the render thread is busy are dropped, which is what an intro video
- * wants - a late frame is worse than a skipped one.</p>
+ * uploads it. The producer always writes into the buffer after the published one, so the buffer the
+ * render thread is reading is never touched - no producer-side copy, no lock held during conversion,
+ * and frames produced while the render thread is busy are dropped, which is what an intro video wants
+ * - a late frame is worse than a skipped one.</p>
  *
  * <p>Everything the render thread does per frame is one copy plus the upload. In particular the alpha
  * masking for an opaque scene happens on the decode thread (see {@link #setForceOpaque}), where there is
@@ -25,12 +27,12 @@ public final class VideoFrameSink {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("Titlescreen/Video");
     private static final int BYTES_PER_PIXEL = 4;
+    /** One buffer being displayed/copied, one being written, one in reserve: no copies, no tears. */
+    private static final int BUFFER_COUNT = 3;
 
     private final Object lock = new Object();
 
-    /** Two alternating buffers: the producer writes one while the other holds the published frame. */
-    private final ByteBuffer[] buffers = new ByteBuffer[2];
-    private int writeIndex;
+    private final ByteBuffer[] buffers = new ByteBuffer[BUFFER_COUNT];
     private int latestIndex = -1;
     private boolean dirty;
 
@@ -63,63 +65,66 @@ public final class VideoFrameSink {
     }
 
     /**
-     * Producer side. Called from the decoder's frame thread.
+     * Producer side. Called from the decoder's frame thread: returns the buffer the next frame
+     * should be converted into - the one buffer the render thread is not reading and not holding.
+     * The conversion (swscale) writes into it directly; {@link #commitFrame} then publishes it.
      *
-     * @param source        direct buffer holding the first video plane
-     * @param sourcePitch   row stride (in bytes) of the source plane
-     * @param frameWidth    width of the decoded picture
+     * @param frameWidth    width of the decoded picture (the buffers are resized to match)
      * @param frameHeight   height of the decoded picture
-     * @param visibleWidth  width of the visible picture
-     * @param visibleHeight height of the visible picture
-     * @param bgrFallback   the source could not give us RGBA, so the frame is BGRX and has to be swizzled
-     *                      (and given an opaque alpha channel) manually
+     * @return a direct RGBA buffer of {@code frameWidth x frameHeight} pixels
      */
-    public void offerFrame(ByteBuffer source, int sourcePitch, int frameWidth, int frameHeight,
-                           int visibleWidth, int visibleHeight, boolean bgrFallback) {
-        if (source == null || frameWidth <= 0 || frameHeight <= 0) {
-            return;
-        }
-
-        int rowBytes = frameWidth * BYTES_PER_PIXEL;
-        int pitch = sourcePitch > 0 ? sourcePitch : rowBytes;
-
+    public ByteBuffer beginFrame(int frameWidth, int frameHeight) {
         synchronized (this.lock) {
+            if (frameWidth <= 0 || frameHeight <= 0) {
+                return null;
+            }
             if (this.width != frameWidth || this.height != frameHeight) {
                 this.reallocate(frameWidth, frameHeight);
             }
-            this.visibleWidth = visibleWidth > 0 && visibleWidth <= frameWidth ? visibleWidth : frameWidth;
-            this.visibleHeight = visibleHeight > 0 && visibleHeight <= frameHeight ? visibleHeight : frameHeight;
+            return this.buffers[(this.latestIndex + 1) % this.buffers.length];
+        }
+    }
 
-            ByteBuffer target = this.buffers[this.writeIndex];
-            long sourceBase = MemoryUtil.memAddress(source);
-            long targetBase = MemoryUtil.memAddress(target);
-            for (int y = 0; y < frameHeight; y++) {
-                MemoryUtil.memCopy(sourceBase + (long) y * pitch, targetBase + (long) y * rowBytes, rowBytes);
+    /**
+     * Runs the opaque-scene alpha handling on a producer-owned frame buffer - outside the lock,
+     * where the spare time is.
+     */
+    public void processAlpha(ByteBuffer buffer, int pixelCount) {
+        if (!this.forceOpaque) {
+            return;
+        }
+        if (this.alphaProbeFrames > 0 && !this.alphaPresent) {
+            this.alphaPresent = hasAlpha(buffer, pixelCount);
+            if (!this.alphaPresent && --this.alphaProbeFrames == 0) {
+                // Five frames without a single transparent pixel: this video has no transparency to
+                // drop, so stop rewriting the alpha channel of every frame - at 4K that pass alone
+                // starves the decoder's output thread, which in turn stalls the demuxer and the audio
+                // with it.
+                this.forceOpaque = false;
+                LOGGER.debug("Video has no transparency - skipping the alpha pass from now on");
             }
+        }
+        if (this.forceOpaque) {
+            forceOpaqueAlpha(buffer, pixelCount);
+        }
+    }
 
-            if (bgrFallback) {
-                swizzleBgrToRgba(target, frameWidth * frameHeight);
-            } else if (this.forceOpaque) {
-                if (this.alphaProbeFrames > 0 && !this.alphaPresent) {
-                    this.alphaPresent = hasAlpha(target, frameWidth * frameHeight);
-                    if (!this.alphaPresent && --this.alphaProbeFrames == 0) {
-                        // Five frames without a single transparent pixel: this video has no transparency to
-                        // drop, so stop rewriting the alpha channel of every frame - at 4K that pass alone
-                        // starves the decoder's output thread, which in turn stalls the demuxer and the audio
-                        // with it.
-                        this.forceOpaque = false;
-                        LOGGER.debug("Video has no transparency - skipping the alpha pass from now on");
-                    }
-                }
-                if (this.forceOpaque) {
-                    forceOpaqueAlpha(target, frameWidth * frameHeight);
-                }
+    /**
+     * Producer side: publishes the buffer that {@link #beginFrame} handed out (one commit per
+     * begun frame). The lock is held only for the bookkeeping, never for the conversion.
+     *
+     * @param visibleWidth  width of the visible picture
+     * @param visibleHeight height of the visible picture
+     */
+    public void commitFrame(int visibleWidth, int visibleHeight) {
+        synchronized (this.lock) {
+            if (this.width <= 0) {
+                return;
             }
-
-            // Publish the freshly written buffer and keep the other one for the next write.
+            this.visibleWidth = visibleWidth > 0 && visibleWidth <= this.width ? visibleWidth : this.width;
+            this.visibleHeight = visibleHeight > 0 && visibleHeight <= this.height ? visibleHeight : this.height;
+            this.latestIndex = (this.latestIndex + 1) % this.buffers.length;
             this.producedFrames++;
-            this.latestIndex = this.writeIndex;
-            this.writeIndex = 1 - this.writeIndex;
             this.dirty = true;
         }
     }
@@ -221,7 +226,6 @@ public final class VideoFrameSink {
             this.visibleWidth = -1;
             this.visibleHeight = -1;
             this.latestIndex = -1;
-            this.writeIndex = 0;
             this.dirty = false;
             this.producedFrames = 0L;
         }
@@ -235,20 +239,8 @@ public final class VideoFrameSink {
             MemoryUtil.memFree(this.buffers[i]);
             this.buffers[i] = MemoryUtil.memAlloc((int) size);
         }
-        this.writeIndex = 0;
         this.latestIndex = -1;
         this.dirty = false;
-    }
-
-    /** BGRX -> RGBA, also forcing the alpha channel to opaque. */
-    private static void swizzleBgrToRgba(ByteBuffer buffer, int pixelCount) {
-        java.nio.IntBuffer ints = buffer.asIntBuffer();
-        for (int i = 0; i < pixelCount; i++) {
-            int pixel = ints.get(i);
-            int red = (pixel >>> 16) & 0xFF;
-            int blue = pixel & 0xFF;
-            ints.put(i, 0xFF000000 | (blue << 16) | (pixel & 0x0000FF00) | red);
-        }
     }
 
     /** Sets the alpha channel of every pixel to opaque, keeping the colour channels untouched. */

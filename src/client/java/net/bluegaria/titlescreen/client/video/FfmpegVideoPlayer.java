@@ -2,9 +2,11 @@ package net.bluegaria.titlescreen.client.video;
 
 import org.bytedeco.ffmpeg.avcodec.AVCodec;
 import org.bytedeco.ffmpeg.avcodec.AVCodecContext;
+import org.bytedeco.ffmpeg.avcodec.AVCodecHWConfig;
 import org.bytedeco.ffmpeg.avcodec.AVPacket;
 import org.bytedeco.ffmpeg.avformat.AVFormatContext;
 import org.bytedeco.ffmpeg.avformat.AVStream;
+import org.bytedeco.ffmpeg.avutil.AVBufferRef;
 import org.bytedeco.ffmpeg.avutil.AVChannelLayout;
 import org.bytedeco.ffmpeg.avutil.AVDictionary;
 import org.bytedeco.ffmpeg.avutil.AVFrame;
@@ -18,16 +20,20 @@ import org.bytedeco.ffmpeg.swresample.SwrContext;
 import org.bytedeco.ffmpeg.swscale.SwsContext;
 import org.bytedeco.javacpp.BytePointer;
 import org.bytedeco.javacpp.DoublePointer;
+import org.bytedeco.javacpp.Loader;
 import org.bytedeco.javacpp.PointerPointer;
 import org.lwjgl.system.MemoryUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.File;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * FFmpeg based {@link VideoPlayer} using the libraries bundled with the mod.
@@ -166,7 +172,6 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     private int swsWidth = -1;
     private int swsHeight = -1;
     private AVFrame rgbaFrame;
-    private ByteBuffer rgbaBuffer;
 
     private SwrContext swrContext;
     private int swrInFormat = -1;
@@ -178,6 +183,18 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     private AudioOutput audioOutput;
     private int audioOutRate;
     private int audioOutChannels;
+
+    // Hardware decoding: a device is created per session (D3D11VA on Windows, VideoToolbox on
+    // macOS, VAAPI or NVDEC on Linux); hardware frames are downloaded to system memory and then
+    // travel through the same swscale conversion as software frames.
+    private volatile boolean hardwareDecoding = true;
+    private static final AtomicBoolean HW_UNUSABLE = new AtomicBoolean(false);
+    private AVBufferRef hwDeviceBuf;
+    private int hwPixFmt = -1;
+    private boolean hwActive;
+    private int hwTransferFailures;
+    private long presentedFrames;
+    private AVFrame swFrame;
 
     // Decode-thread bookkeeping.
     private long anchorNanos;
@@ -282,6 +299,7 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
 
         this.packet = avcodec.av_packet_alloc();
         this.frame = avutil.av_frame_alloc();
+        this.swFrame = avutil.av_frame_alloc();
         this.pendingStartSilence = this.audioDelayMs < 0;
         this.anchorNanos = System.nanoTime();
         this.clockOffsetMs = 0L;
@@ -332,6 +350,9 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         // keeps 4K software decoding playable at all.
         codecContext.thread_count(0);
         codecContext.thread_type(FF_THREAD_FRAME | FF_THREAD_SLICE);
+        if (label.equals("video")) {
+            setupHardwareDecoding(codec, codecContext);
+        }
         ret = avcodec.avcodec_open2(codecContext, codec, (AVDictionary) null);
         if (ret < 0) {
             LOGGER.warn("Could not open the {} decoder of stream {} in {}: {}",
@@ -346,6 +367,138 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         return timeBase.num() > 0 && timeBase.den() > 0
                 ? 1000.0 * timeBase.num() / timeBase.den() : 1.0;
     }
+
+    // ------------------------------------------------------------------
+    // Hardware decoding (VP9 via D3D11VA / VideoToolbox / VAAPI / NVDEC)
+    // ------------------------------------------------------------------
+
+    /** The platform's hardware device type, in the order it should be tried. */
+    private static int[] hwDeviceTypes() {
+        String platform = Loader.getPlatform();
+        if (platform.startsWith("windows")) {
+            return new int[]{avutil.AV_HWDEVICE_TYPE_D3D11VA};
+        }
+        if (platform.startsWith("macosx")) {
+            return new int[]{avutil.AV_HWDEVICE_TYPE_VIDEOTOOLBOX};
+        }
+        if (platform.startsWith("linux")) {
+            // VAAPI covers Intel/AMD; NVDEC covers NVIDIA. Both are tried in turn.
+            return new int[]{avutil.AV_HWDEVICE_TYPE_VAAPI, avutil.AV_HWDEVICE_TYPE_CUDA};
+        }
+        return new int[0];
+    }
+
+    private static String hwDeviceTypeName(int type) {
+        if (type == avutil.AV_HWDEVICE_TYPE_D3D11VA) return "D3D11VA";
+        if (type == avutil.AV_HWDEVICE_TYPE_VIDEOTOOLBOX) return "VideoToolbox";
+        if (type == avutil.AV_HWDEVICE_TYPE_VAAPI) return "VAAPI";
+        if (type == avutil.AV_HWDEVICE_TYPE_CUDA) return "NVDEC/CUDA";
+        return "type " + type;
+    }
+
+    /**
+     * Requests hardware-decoded frames for the video decoder when the option is on, the platform
+     * offers a device type, the codec supports it, and a previous session has not proven the
+     * hardware path broken in this process. Anything else quietly keeps software decoding, which
+     * is always available as the fallback.
+     */
+    private void setupHardwareDecoding(AVCodec codec, AVCodecContext codecContext) {
+        if (!this.hardwareDecoding || HW_UNUSABLE.get()) {
+            return;
+        }
+        for (int type : hwDeviceTypes()) {
+            // Does the codec have a hardware configuration for this device type at all?
+            boolean codecSupports = false;
+            for (int i = 0; ; i++) {
+                AVCodecHWConfig config = avcodec.avcodec_get_hw_config(codec, i);
+                if (config == null) {
+                    break;
+                }
+                if ((config.methods() & avcodec.AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) != 0
+                        && config.device_type() == type) {
+                    this.hwPixFmt = config.pix_fmt();
+                    codecSupports = true;
+                    break;
+                }
+            }
+            if (!codecSupports) {
+                continue;
+            }
+            if (!createHwDevice(type)) {
+                continue;
+            }
+            codecContext.hw_device_ctx(avutil.av_buffer_ref(this.hwDeviceBuf));
+            this.hwActive = true;
+            if (this.debug) {
+                LOGGER.info("Decoding {} on the GPU ({})", this.file, hwDeviceTypeName(type));
+            }
+            return;
+        }
+        if (this.debug) {
+            LOGGER.info("No usable hardware decoder for {} - decoding in software", this.file);
+        }
+    }
+
+    private boolean createHwDevice(int type) {
+        this.hwDeviceBuf = new AVBufferRef(null);
+        // The default device first; on Linux also try every render node, since multi-GPU
+        // machines may expose the working VAAPI device on the second one.
+        if (tryCreateHwDevice(type, null)) {
+            return true;
+        }
+        if (type == avutil.AV_HWDEVICE_TYPE_VAAPI) {
+            File[] nodes = new File("/dev/dri").listFiles((dir, name) -> name.startsWith("renderD"));
+            if (nodes != null) {
+                Arrays.sort(nodes);
+                for (File node : nodes) {
+                    if (tryCreateHwDevice(type, node.getAbsolutePath())) {
+                        return true;
+                    }
+                }
+            }
+        }
+        this.hwDeviceBuf = null;
+        return false;
+    }
+
+    private boolean tryCreateHwDevice(int type, String device) {
+        int ret = avutil.av_hwdevice_ctx_create(this.hwDeviceBuf, type, device, null, 0);
+        if (ret < 0) {
+            if (this.debug) {
+                LOGGER.info("Could not open a {} device{}: {}", hwDeviceTypeName(type),
+                        device == null ? "" : " (" + device + ")", errorString(ret));
+            }
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Downloads a hardware-decoded frame into system memory (NV12) so the usual swscale
+     * conversion can run on it.
+     */
+    private boolean downloadHwFrame(AVFrame hwFrame) {
+        this.swFrame.format(avutil.AV_PIX_FMT_NV12);
+        this.swFrame.width(hwFrame.width());
+        this.swFrame.height(hwFrame.height());
+        if (avutil.av_hwframe_transfer_data(this.swFrame, hwFrame, 0) < 0) {
+            avutil.av_frame_unref(this.swFrame);
+            this.hwTransferFailures++;
+            if (this.hwTransferFailures >= 3) {
+                // The hardware path is not delivering usable frames - remember that for the rest
+                // of the session; the manager's restart then comes back in software.
+                HW_UNUSABLE.set(true);
+                LOGGER.warn("Hardware frame download kept failing - falling back to software decoding");
+            }
+            return false;
+        }
+        // Set after the transfer: it allocates the destination buffers and resets the fields.
+        this.swFrame.pts(hwFrame.pts());
+        this.hwTransferFailures = 0;
+        return true;
+    }
+
+    // __PART_HW2__
 
     // ------------------------------------------------------------------
     // Decoding (decode thread)
@@ -415,23 +568,43 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
                 // EAGAIN: the decoder wants more input; a negative value at the end: drained.
                 return;
             }
-            long pts = this.frame.pts();
-            double ptsMs = pts == avutil.AV_NOPTS_VALUE ? this.lastVideoPtsMs
-                    : pts * this.videoTimeBaseMs;
+            AVFrame source = this.frame;
+            if (this.hwActive && this.frame.format() == this.hwPixFmt) {
+                if (!downloadHwFrame(this.frame)) {
+                    continue;
+                }
+                source = this.swFrame;
+            }
+            long pts = source.pts();
+            double ptsMs;
+            if (pts == avutil.AV_NOPTS_VALUE) {
+                // Some hardware paths lose the timestamp: synthesize one from the frame rate -
+                // that is what the pacing and the end-of-video checks need it for.
+                ptsMs = this.lastVideoPtsMs >= 0L ? this.lastVideoPtsMs + this.frameDurationMs
+                        : clockMs();
+            } else {
+                ptsMs = pts * this.videoTimeBaseMs;
+            }
             if (ptsMs < this.skipFramesUntilMs) {
                 // Stale frame from before a seek.
+                if (source != this.frame) {
+                    avutil.av_frame_unref(this.swFrame);
+                }
                 continue;
             }
-            presentFrame(ptsMs);
+            presentFrame(source, ptsMs);
+            if (source != this.frame) {
+                avutil.av_frame_unref(this.swFrame);
+            }
             this.lastVideoPtsMs = (long) ptsMs;
             this.cachedTimeMs = (long) ptsMs;
         }
     }
 
-    private void presentFrame(double ptsMs) {
-        int format = this.frame.format();
-        int width = this.frame.width();
-        int height = this.frame.height();
+    private void presentFrame(AVFrame src, double ptsMs) {
+        int format = src.format();
+        int width = src.width();
+        int height = src.height();
         if (width <= 0 || height <= 0) {
             return;
         }
@@ -441,14 +614,25 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
                 return;
             }
         }
-        swscale.sws_scale(this.swsContext, this.frame.data(), this.frame.linesize(),
+        // The conversion writes straight into the sink's staging buffer: no intermediate frame
+        // copy on the producer side, which is what keeps the decode thread comfortably inside the
+        // frame budget at 4K.
+        ByteBuffer target = this.sink.beginFrame(width, height);
+        if (target == null) {
+            return;
+        }
+        target.clear();
+        avutil.av_image_fill_arrays(this.rgbaFrame.data(), this.rgbaFrame.linesize(),
+                new BytePointer(target), avutil.AV_PIX_FMT_RGBA, width, height, 1);
+        swscale.sws_scale(this.swsContext, src.data(), src.linesize(),
                 0, height, this.rgbaFrame.data(), this.rgbaFrame.linesize());
-        this.rgbaBuffer.position(0).limit(width * height * 4);
-        this.sink.offerFrame(this.rgbaBuffer, width * 4, width, height, width, height, false);
+        this.sink.processAlpha(target, width * height);
+        this.sink.commitFrame(width, height);
         this.firstFrameSeen = true;
+        this.presentedFrames++;
     }
 
-    /** Builds (or rebuilds) the YUV(A) -> RGBA conversion for a new frame size/format. */
+    /** Builds (or rebuilds) the YUV(A)/NV12 -> RGBA conversion for a new frame size/format. */
     private void recreateScaler(int format, int width, int height) {
         releaseScaler();
         this.swsContext = swscale.sws_getContext(width, height, format, width, height,
@@ -460,10 +644,9 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         this.swsFormat = format;
         this.swsWidth = width;
         this.swsHeight = height;
-        this.rgbaBuffer = MemoryUtil.memAlloc(width * height * 4);
+        // The destination frame is a pointer carrier: av_image_fill_arrays re-points its data at
+        // the sink's staging buffer for every frame.
         this.rgbaFrame = avutil.av_frame_alloc();
-        avutil.av_image_fill_arrays(this.rgbaFrame.data(), this.rgbaFrame.linesize(),
-                new BytePointer(this.rgbaBuffer), avutil.AV_PIX_FMT_RGBA, width, height, 1);
         if (this.debug) {
             LOGGER.info("Scaling {}x{} (format {}) to RGBA for {}", width, height, format, this.file);
         }
@@ -477,10 +660,6 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         if (this.rgbaFrame != null) {
             avutil.av_frame_free(this.rgbaFrame);
             this.rgbaFrame = null;
-        }
-        if (this.rgbaBuffer != null) {
-            MemoryUtil.memFree(this.rgbaBuffer);
-            this.rgbaBuffer = null;
         }
         this.swsFormat = -1;
         this.swsWidth = -1;
@@ -867,6 +1046,11 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     }
 
     @Override
+    public void setHardwareDecoding(boolean hardwareDecoding) {
+        this.hardwareDecoding = hardwareDecoding;
+    }
+
+    @Override
     public void setDebugLogging(boolean debug) {
         this.debug = debug;
         if (FfmpegNativeLibrary.isAvailable()) {
@@ -888,6 +1072,12 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         this.closed = true;
         joinQuietly(this.decodeThread, 5000);
         joinQuietly(this.audioThread, 2000);
+        if (this.hwActive && this.presentedFrames == 0) {
+            // The hardware path never produced a picture in this session: stop offering it, so
+            // the next session (the manager's restart) comes back in software.
+            HW_UNUSABLE.set(true);
+            LOGGER.warn("Hardware decoding produced no frames - software decoding will be used instead");
+        }
         if (this.decodeThread != null && this.decodeThread.isAlive()) {
             // Freeing while the decode thread still runs would crash; leaking the context is the
             // smaller problem (it is reclaimed when the process exits).
@@ -939,6 +1129,16 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
             MemoryUtil.memFree(this.pcmBuffer);
             this.pcmBuffer = null;
         }
+        if (this.swFrame != null) {
+            avutil.av_frame_free(this.swFrame);
+            this.swFrame = null;
+        }
+        if (this.hwDeviceBuf != null) {
+            avutil.av_buffer_unref(this.hwDeviceBuf);
+            this.hwDeviceBuf = null;
+        }
+        this.hwActive = false;
+        this.hwPixFmt = -1;
     }
 
     // ------------------------------------------------------------------
@@ -966,16 +1166,17 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
 
     /** FFmpeg's av_err2str, which is a C macro and has no JavaCPP binding. */
     private static String errorString(int code) {
-        BytePointer buffer = new BytePointer(1024);
+        byte[] bytes = new byte[128];
+        BytePointer buffer = new BytePointer(bytes);
         try {
-            if (avutil.av_strerror(code, buffer, 1024) == 0) {
-                return buffer.getString();
-            }
-        } catch (Throwable ignored) {
-            // Fall through to the numeric code.
+            avutil.av_strerror(code, buffer, bytes.length);
         } finally {
             buffer.releaseReference();
         }
-        return "error " + code;
+        int end = 0;
+        while (end < bytes.length && bytes[end] != 0) {
+            end++;
+        }
+        return new String(bytes, 0, end, java.nio.charset.StandardCharsets.US_ASCII);
     }
 }

@@ -19,3 +19,5 @@ bin/
 
 # Fabric / Local Runs
 run/
+sources/
+ffmpeg-*

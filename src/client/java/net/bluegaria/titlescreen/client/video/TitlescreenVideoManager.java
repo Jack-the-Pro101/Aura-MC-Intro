@@ -463,6 +463,7 @@ public final class TitlescreenVideoManager {
         this.backgroundPreloadRequested = true;
         Thread thread = new Thread(() -> {
             this.backgroundPlayer.setDebugLogging(cfg.general.debugLogging);
+            this.backgroundPlayer.setHardwareDecoding(cfg.video.hardwareDecoding);
             // Volume 0: the preload decodes the first frame while the game is still starting up, and
             // playing the audio there would be heard long before anything is on screen.
             boolean ok = this.backgroundPlayer.preload(path, 0);
@@ -555,6 +556,7 @@ public final class TitlescreenVideoManager {
         long generation = ++this.backgroundGeneration;
         Thread thread = new Thread(() -> {
             this.backgroundPlayer.setDebugLogging(cfg.general.debugLogging);
+            this.backgroundPlayer.setHardwareDecoding(cfg.video.hardwareDecoding);
             boolean ok = this.backgroundPlayer.start(path, loadingVolume(cfg));
             if (ok && usesSeparateAudioPlayer(cfg)) {
                 this.audioPlayer.start(path, loadingVolume(cfg));
@@ -822,6 +824,7 @@ public final class TitlescreenVideoManager {
         long generation = ++this.sessionGeneration;
         Thread thread = new Thread(() -> {
             this.player.setDebugLogging(cfg.general.debugLogging);
+            this.player.setHardwareDecoding(cfg.video.hardwareDecoding);
             boolean ok = this.player.start(path, cfg.video.videoVolume);
             if (usesSeparateAudioPlayer(cfg)) {
                 // Reached when a baked video is retried (normally its sound is already playing): restart it

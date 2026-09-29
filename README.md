@@ -1,5 +1,9 @@
 # Titlescreen
 
+Note: This whole thing is basically vibe coded. I am experimenting with AI stuff.
+
+---
+
 A Fabric mod for Minecraft **1.21.10, 1.21.11, 26.1, 26.2 and 26.3** that replaces the vanilla loading/title screen presentation with a
 configurable **video intro** - typically one baked clip that covers the whole start-up:
 
@@ -55,22 +59,15 @@ ffmpeg -i input.mov -c:v libvpx-vp9 -pix_fmt yuv420p -crf 28 -b:v 0 -deadline go
        -row-mt 1 -c:a libopus -b:a 128k intro.webm
 ```
 
-H.264 MP4 files work too (FFmpeg decodes them the same way), but they cannot carry an alpha channel.
-
-An alpha channel in the source (VP9 profile 1, `-pix_fmt yuva420p`) is preserved all the way to the
-screen, because the mod decodes through FFmpeg directly - the previous libVLC-based releases flattened
-it to opaque in libVLC's conversion chain. Planar alpha costs extra conversion time per frame, so for an
-ordinary opaque intro keep `yuv420p`.
-
 ### Single baked video (loading screen + intro in one file)
 
 Put both scenes into **one** video (the Mojang/loading part first, then the intro) and point the intro's
 `videoPath` at it. Then set:
 
-| Option | Meaning |
-| --- | --- |
-| `loadingBackground.useIntroVideo` | `true` — the loading screen plays that same file instead of a second one |
-| `loadingBackground.holdAtMs` | timestamp where the loading screen freezes on a frame and waits for the game to finish loading (e.g. the end of the Mojang part) |
+| Option                            | Meaning                                                                                                                          |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `loadingBackground.useIntroVideo` | `true` — the loading screen plays that same file instead of a second one                                                         |
+| `loadingBackground.holdAtMs`      | timestamp where the loading screen freezes on a frame and waits for the game to finish loading (e.g. the end of the Mojang part) |
 
 The loading screen plays from 0 to `holdAtMs`, **holds that exact frame** while the game finishes
 loading, and the intro then **continues from that same frame** — no gap, no second file, no
@@ -80,13 +77,12 @@ and the loading scene keeps its own look via `loadingBackground.fadeInMs` / `opa
 Because the whole thing is opaque, nothing here depends on alpha support: it is a single ordinary
 video (VP8/VP9 WebM, H.264 MP4, whatever FFmpeg can decode).
 
-
-* **Resolution**: frames are decoded at the video's native size and converted to RGBA by FFmpeg's own
+- **Resolution**: frames are decoded at the video's native size and converted to RGBA by FFmpeg's own
   scaler (`swscale`) on the decode threads, which use every core through VP9 frame threading. The cost
   per displayed frame is one copy into the texture plus the GPU upload - the alpha handling for the
   opaque scenes happens on the decode thread. If a 4K clip is too much for the machine anyway,
   `videoMaxFps` / `loadingBackground.maxFps` bound how often a frame is uploaded.
-* **Audio**: the sound comes from the video itself, so the file has to contain an audio track
+- **Audio**: the sound comes from the video itself, so the file has to contain an audio track
   (`ffprobe intro.webm` shows the streams). The mod logs which files have no audio track, and each
   video has its own **volume** option - the loading background defaults to `0`, so raise it (e.g. to
   `100`) if you want to hear it. The loading background is preloaded silently and only gets its volume
@@ -126,10 +122,10 @@ The config lives in `config/titlescreen.json` and is editable in-game via the Cl
 
 **Every timing is relative to the scene it belongs to**, so the two videos can be tuned independently:
 
-| Scene | Reference point for its timings |
-| --- | --- |
-| Loading background (`loadingBackground`) | the moment the loading screen appears and the background video starts (`fadeInMs`, `maxFps`, `waitForVideoToFinish`, `maxWaitForVideoMs`) |
-| Intro video (`timing`) | the **first frame that is actually on screen** of the intro video (`videoStartDelayMs`, `videoFadeInMs`, `progressBarFade*`, `overlayUnloadAtMs`, `buttonsFadeInAtMs`, `buttonsFadeInDurationMs`, `videoFadeOutMs`, `loop*`) |
+| Scene                                    | Reference point for its timings                                                                                                                                                                                              |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Loading background (`loadingBackground`) | the moment the loading screen appears and the background video starts (`fadeInMs`, `maxFps`, `waitForVideoToFinish`, `maxWaitForVideoMs`)                                                                                    |
+| Intro video (`timing`)                   | the **first frame that is actually on screen** of the intro video (`videoStartDelayMs`, `videoFadeInMs`, `progressBarFade*`, `overlayUnloadAtMs`, `buttonsFadeInAtMs`, `buttonsFadeInDurationMs`, `videoFadeOutMs`, `loop*`) |
 
 The intro timeline deliberately starts with the first displayed frame rather than when the decoder is asked
 to start: starting a video takes a moment, and using the request time shifted every timing by that
@@ -137,69 +133,75 @@ amount (most visibly the button fade-in). If the video never produces a frame, t
 from the anchor is used after a few seconds so the loading screen still clears.
 
 ### General
-| Option | Default | Description |
-| --- | --- | --- |
-| `enabled` | `true` | Master switch - disables every behaviour of the mod when off. |
-| `suppressMenuMusic` | `true` | Keep Minecraft's menu music quiet while the video is playing, so it cannot talk over the video's own soundtrack. The music returns when the video has ended. |
-| `fadeInAfterVideo` | `true` | Keep the "MINECRAFT" wordmark hidden while the video plays, and start fading it in the moment the video ends - so it cross-dissolves with the video's own fade-out. Off leaves the wordmark exactly as vanilla draws it. |
-| `hideSplashText` | `false` | Hides the rotating yellow splash text. |
-| `debugLogging` | `false` | Logs the intro state machine (useful while tuning timings). |
-| `replayOnResourceReload` | `false` | Replays the intro on resource reloads (F3+T, resource pack changes). |
-| `useBundledDefaultVideo` | `true` | Play the video bundled inside the mod when the configured file is missing - the video works with no setup, and a file at that path overrides the bundled one. |
+
+| Option                   | Default | Description                                                                                                                                                                                                              |
+| ------------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `enabled`                | `true`  | Master switch - disables every behaviour of the mod when off.                                                                                                                                                            |
+| `suppressMenuMusic`      | `true`  | Keep Minecraft's menu music quiet while the video is playing, so it cannot talk over the video's own soundtrack. The music returns when the video has ended.                                                             |
+| `fadeInAfterVideo`       | `true`  | Keep the "MINECRAFT" wordmark hidden while the video plays, and start fading it in the moment the video ends - so it cross-dissolves with the video's own fade-out. Off leaves the wordmark exactly as vanilla draws it. |
+| `hideSplashText`         | `false` | Hides the rotating yellow splash text.                                                                                                                                                                                   |
+| `debugLogging`           | `false` | Logs the intro state machine (useful while tuning timings).                                                                                                                                                              |
+| `replayOnResourceReload` | `false` | Replays the intro on resource reloads (F3+T, resource pack changes).                                                                                                                                                     |
+| `useBundledDefaultVideo` | `true`  | Play the video bundled inside the mod when the configured file is missing - the video works with no setup, and a file at that path overrides the bundled one.                                                            |
 
 ### Video
-| Option | Default | Description |
-| --- | --- | --- |
-| `videoPath` | `config/titlescreen/intro.webm` | Video file, relative to the game directory. |
-| `videoVolume` | `100` | Audio volume, 0-100. |
-| `audioDelayMs` | `0` | Shifts a baked video's sound relative to its picture in milliseconds. Positive plays the sound later. Only used when `audioInSamePlayer` is off - with one player for both streams they share a clock and need no delay. Tune by ear; a faster machine needs less, or a negative value. |
-| `audioInSamePlayer` | `true` | Play the sound inside the video player: one clock, so no drift and no delay needed, and the decoder keeps the sound on time by dropping late video frames. Off = a separate audio-only player, which a slow video pipeline cannot starve, but then `audioDelayMs` is what lines the two clocks up. |
-| `videoOpacity` | `100` | Extra opacity multiplier on top of the video's alpha. |
-| `videoFit` | `COVER` | `COVER` (crop), `CONTAIN` (letterbox) or `STRETCH`. |
-| `videoMaxFps` | `60` | Upper bound for GPU texture uploads per second, `0` = unlimited. |
+
+| Option              | Default                         | Description                                                                                                                                                                                                                                                                                        |
+| ------------------- | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `videoPath`         | `config/titlescreen/intro.webm` | Video file, relative to the game directory.                                                                                                                                                                                                                                                        |
+| `videoVolume`       | `100`                           | Audio volume, 0-100.                                                                                                                                                                                                                                                                               |
+| `audioDelayMs`      | `0`                             | Shifts a baked video's sound relative to its picture in milliseconds. Positive plays the sound later. Only used when `audioInSamePlayer` is off - with one player for both streams they share a clock and need no delay. Tune by ear; a faster machine needs less, or a negative value.            |
+| `audioInSamePlayer` | `true`                          | Play the sound inside the video player: one clock, so no drift and no delay needed, and the decoder keeps the sound on time by dropping late video frames. Off = a separate audio-only player, which a slow video pipeline cannot starve, but then `audioDelayMs` is what lines the two clocks up. |
+| `videoOpacity`      | `100`                           | Extra opacity multiplier on top of the video's alpha.                                                                                                                                                                                                                                              |
+| `videoFit`          | `COVER`                         | `COVER` (crop), `CONTAIN` (letterbox) or `STRETCH`.                                                                                                                                                                                                                                                |
+| `videoMaxFps`       | `60`                            | Upper bound for GPU texture uploads per second, `0` = unlimited.                                                                                                                                                                                                                                   |
+| `hardwareDecoding`  | `true`                          | Decode the video on the GPU: D3D11VA on Windows, VideoToolbox on macOS, VAAPI (Intel/AMD) or NVDEC (NVIDIA) on Linux. Needs the GPU vendor's driver installed; falls back to software decoding automatically when no working decoder is found.                                                     |
 
 ### Timing (relative to the intro video, measured from its first displayed frame)
-| Option | Default | Description |
-| --- | --- | --- |
-| `videoStartDelayMs` | `0` | Delay between finishing loading and the first video frame. |
-| `videoFadeInMs` | `400` | Video fade-in duration. Only used when the loading screen does not reuse the intro video. |
-| `progressBarFadeStartMs` | `200` | Video timestamp at which the progress bar starts fading. |
-| `progressBarFadeDurationMs` | `800` | How long the progress bar takes to disappear. |
-| `overlayUnloadAtMs` | `1400` | Video timestamp at which the loading overlay (MOJANG logo) is unloaded. `0` = vanilla transition. |
-| `overlayUnloadStyle` | `INSTANT` | `INSTANT` drops the loading scene at the timestamp; `VANILLA_FADE` uses vanilla's two second cross-fade underneath the video. |
-| `buttonsFadeInAtMs` | `900` | Video timestamp at which the buttons start fading in. |
-| `buttonsFadeInDurationMs` | `1000` | How long the buttons take to fade in. |
-| `textFadeInAtMs` | `900` | Video timestamp at which the version/mod-count line and the splash text start fading in (fully transparent before it). The Realms badge fades in from the moment it appears instead. |
-| `textFadeInDurationMs` | `1000` | How long those texts take to fade in (also the Realms badge's fade, and the wordmark's fade after the video). Set it equal to `videoFadeOutMs` for a symmetric cross-dissolve. |
-| `videoFadeOutMs` | `1200` | Fade used by `FADE_OUT_TO_PANORAMA`. |
-| `endBehaviour` | `FADE_OUT_TO_PANORAMA` | `LOOP_REGION`, `FADE_OUT_TO_PANORAMA` or `FREEZE_LAST_FRAME`. |
-| `loopStartMs` / `loopEndMs` | `0` / `0` | Loop region for `LOOP_REGION`; `loopEndMs = 0` means end of video. |
+
+| Option                      | Default                | Description                                                                                                                                                                          |
+| --------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `videoStartDelayMs`         | `0`                    | Delay between finishing loading and the first video frame.                                                                                                                           |
+| `videoFadeInMs`             | `400`                  | Video fade-in duration. Only used when the loading screen does not reuse the intro video.                                                                                            |
+| `progressBarFadeStartMs`    | `200`                  | Video timestamp at which the progress bar starts fading.                                                                                                                             |
+| `progressBarFadeDurationMs` | `800`                  | How long the progress bar takes to disappear.                                                                                                                                        |
+| `overlayUnloadAtMs`         | `1400`                 | Video timestamp at which the loading overlay (MOJANG logo) is unloaded. `0` = vanilla transition.                                                                                    |
+| `overlayUnloadStyle`        | `INSTANT`              | `INSTANT` drops the loading scene at the timestamp; `VANILLA_FADE` uses vanilla's two second cross-fade underneath the video.                                                        |
+| `buttonsFadeInAtMs`         | `900`                  | Video timestamp at which the buttons start fading in.                                                                                                                                |
+| `buttonsFadeInDurationMs`   | `1000`                 | How long the buttons take to fade in.                                                                                                                                                |
+| `textFadeInAtMs`            | `900`                  | Video timestamp at which the version/mod-count line and the splash text start fading in (fully transparent before it). The Realms badge fades in from the moment it appears instead. |
+| `textFadeInDurationMs`      | `1000`                 | How long those texts take to fade in (also the Realms badge's fade, and the wordmark's fade after the video). Set it equal to `videoFadeOutMs` for a symmetric cross-dissolve.       |
+| `videoFadeOutMs`            | `1200`                 | Fade used by `FADE_OUT_TO_PANORAMA`.                                                                                                                                                 |
+| `endBehaviour`              | `FADE_OUT_TO_PANORAMA` | `LOOP_REGION`, `FADE_OUT_TO_PANORAMA` or `FREEZE_LAST_FRAME`.                                                                                                                        |
+| `loopStartMs` / `loopEndMs` | `0` / `0`              | Loop region for `LOOP_REGION`; `loopEndMs = 0` means end of video.                                                                                                                   |
 
 ### Layout
-| Option | Default | Description |
-| --- | --- | --- |
-| `buttonsYOffset` | `0` | Moves the buttons down (positive) or up (negative) in GUI pixels. |
-| `buttonsGuiScale` | `-1` | GUI scale for the title screen buttons only; `-1` follows the vanilla GUI scale. |
-| `useVanillaButtonFade` | `false` | Keep vanilla's two second fade and ignore the button timings. |
+
+| Option                 | Default | Description                                                                      |
+| ---------------------- | ------- | -------------------------------------------------------------------------------- |
+| `buttonsYOffset`       | `0`     | Moves the buttons down (positive) or up (negative) in GUI pixels.                |
+| `buttonsGuiScale`      | `-1`    | GUI scale for the title screen buttons only; `-1` follows the vanilla GUI scale. |
+| `useVanillaButtonFade` | `false` | Keep vanilla's two second fade and ignore the button timings.                    |
 
 ### Loading screen background
-| Option | Default | Description |
-| --- | --- | --- |
-| `loadingBackground.enabled` | `true` | Play a video behind the vanilla loading bar instead of the plain red background. |
-| `loadingBackground.videoPath` | `config/titlescreen/loading_background.webm` | Loading background video. Only used when "reuse the intro video" is off. |
-| `loadingBackground.useBundledDefaultVideo` | `true` | Play the loading clip bundled with the mod (`assets/titlescreen/video/mojang_studios.webm`) when the configured file is missing. Only used when "reuse the intro video" is off. |
-| `loadingBackground.volume` | `0` | Audio volume (muted by default). Only used when "reuse the intro video" is off — with a baked video the loading scene plays part of the intro, so the intro's own volume applies to the whole clip. |
-| `loadingBackground.opacity` | `100` | Opacity multiplier. |
-| `loadingBackground.fit` | `COVER` | `COVER`, `CONTAIN` or `STRETCH`. |
-| `loadingBackground.fadeInMs` | `500` | Fade-in once the loading screen appears. |
-| `loadingBackground.maxFps` | `30` | Upload throttle for the background video. |
-| `loadingBackground.hideVanillaLogo` | `true` | Hides the vanilla MOJANG STUDIOS logo while the video is showing. |
-| `loadingBackground.useIntroVideo` | `true` | Use the intro video for the loading screen too - one file with the loading part first and the intro after it. One player, one decoder, no hand-over. Off = use the separate file above. |
-| `loadingBackground.holdAtMs` | `0` | Frame of that video at which the loading scene freezes and waits for the game to finish loading; the intro continues from exactly that frame. `0` plays the whole clip during loading. |
-| `loadingBackground.loop` | `false` | Off = hold the last frame, which leaves a static background for the loading bar. |
-| `loadingBackground.replayOnResourceReload` | `true` | Replays the background on resource reload splashes. |
-| `loadingBackground.waitForVideoToFinish` | `true` | Keeps the loading screen up until the clip has played to the end, so the next scene (intro/title) never starts mid-clip. |
-| `loadingBackground.maxWaitForVideoMs` | `30000` | Safety net for the option above: continue loading after this long even if the video never ends (`0` = wait forever). |
+
+| Option                                     | Default                                      | Description                                                                                                                                                                                         |
+| ------------------------------------------ | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `loadingBackground.enabled`                | `true`                                       | Play a video behind the vanilla loading bar instead of the plain red background.                                                                                                                    |
+| `loadingBackground.videoPath`              | `config/titlescreen/loading_background.webm` | Loading background video. Only used when "reuse the intro video" is off.                                                                                                                            |
+| `loadingBackground.useBundledDefaultVideo` | `true`                                       | Play the loading clip bundled with the mod (`assets/titlescreen/video/mojang_studios.webm`) when the configured file is missing. Only used when "reuse the intro video" is off.                     |
+| `loadingBackground.volume`                 | `0`                                          | Audio volume (muted by default). Only used when "reuse the intro video" is off — with a baked video the loading scene plays part of the intro, so the intro's own volume applies to the whole clip. |
+| `loadingBackground.opacity`                | `100`                                        | Opacity multiplier.                                                                                                                                                                                 |
+| `loadingBackground.fit`                    | `COVER`                                      | `COVER`, `CONTAIN` or `STRETCH`.                                                                                                                                                                    |
+| `loadingBackground.fadeInMs`               | `500`                                        | Fade-in once the loading screen appears.                                                                                                                                                            |
+| `loadingBackground.maxFps`                 | `30`                                         | Upload throttle for the background video.                                                                                                                                                           |
+| `loadingBackground.hideVanillaLogo`        | `true`                                       | Hides the vanilla MOJANG STUDIOS logo while the video is showing.                                                                                                                                   |
+| `loadingBackground.useIntroVideo`          | `true`                                       | Use the intro video for the loading screen too - one file with the loading part first and the intro after it. One player, one decoder, no hand-over. Off = use the separate file above.             |
+| `loadingBackground.holdAtMs`               | `0`                                          | Frame of that video at which the loading scene freezes and waits for the game to finish loading; the intro continues from exactly that frame. `0` plays the whole clip during loading.              |
+| `loadingBackground.loop`                   | `false`                                      | Off = hold the last frame, which leaves a static background for the loading bar.                                                                                                                    |
+| `loadingBackground.replayOnResourceReload` | `true`                                       | Replays the background on resource reload splashes.                                                                                                                                                 |
+| `loadingBackground.waitForVideoToFinish`   | `true`                                       | Keeps the loading screen up until the clip has played to the end, so the next scene (intro/title) never starts mid-clip.                                                                            |
+| `loadingBackground.maxWaitForVideoMs`      | `30000`                                      | Safety net for the option above: continue loading after this long even if the video never ends (`0` = wait forever).                                                                                |
 
 ### Audio cuts in and out while the game is loading
 
@@ -216,7 +218,7 @@ A source that is too heavy for the machine still costs frames, and the cheapest 
    ffmpeg -i intro.webm -c:v libvpx-vp9 -pix_fmt yuv420p -crf 28 -b:v 0 -deadline good -cpu-used 3 \
           -row-mt 1 -c:a copy -y intro_8bit.webm
    ```
-2. A lower `videoMaxFps` / `loadingBackground.maxFps` does *not* help here - the cost is per decoded frame,
+2. A lower `videoMaxFps` / `loadingBackground.maxFps` does _not_ help here - the cost is per decoded frame,
    not per upload.
 
 The picture and the sound are separate players with their own clocks whenever `audioInSamePlayer` is off, and
@@ -234,27 +236,27 @@ other trace is otherwise impossible to tell apart from a log that simply ended.
 Note that the sound can start a hair after the picture, but no longer by a noticeable margin: the audio
 output is opened **before playback** - during the silent preload, at volume 0 - instead of when the loading
 scene begins. An output that already exists only has to be fed; resuming it only means turning the volume
-up. Opening it late costs about a second of silence *and* the same second of delay, which is what used to
+up. Opening it late costs about a second of silence _and_ the same second of delay, which is what used to
 push the sound behind the picture.
 
 ### Video never shows up, or the game seems frozen
 
-* **The client thread never calls into the decoder.** FFmpeg calls happen on the decode and audio threads
+- **The client thread never calls into the decoder.** FFmpeg calls happen on the decode and audio threads
   only; the client thread reads cheap cached values (frame counters, cached positions, container length).
   Player creation happens on background threads, teardown joins those threads with a timeout - and if one
   refuses to stop, its context is leaked rather than ever freezing the game.
-* **Stalled playback is detected.** A decoder occasionally stops delivering frames (the clip just freezes
+- **Stalled playback is detected.** A decoder occasionally stops delivering frames (the clip just freezes
   while its audio keeps playing, or it stops right at the end and never fires its end event). Both scenes
   track uploaded frames themselves:
-  * the loading screen stops waiting for the background video instead of sitting there until
+  - the loading screen stops waiting for the background video instead of sitting there until
     `maxWaitForVideoMs` expires (`Loading background video stopped delivering frames after … frames - continuing without it`),
-  * the intro video is treated as ended so it fades out / freezes like a normally finished video.
-* **A missing video is recovered.** If the intro player starts but never delivers a frame it is restarted
+  - the intro video is treated as ended so it fades out / freezes like a normally finished video.
+- **A missing video is recovered.** If the intro player starts but never delivers a frame it is restarted
   (up to 3 attempts, `The video intro produced no frames … restarting it`), and a failed start is retried
   instead of disabling the video for the rest of the session.
-* Start-up and teardown of the players are serialised, so the hand-over from the loading screen (frozen
+- Start-up and teardown of the players are serialised, so the hand-over from the loading screen (frozen
   background player) to the intro video cannot interleave inside the FFmpeg contexts.
-* With `debugLogging: true`, a watchdog notices a frozen client (no tick for 10 s) and writes a
+- With `debugLogging: true`, a watchdog notices a frozen client (no tick for 10 s) and writes a
   **thread dump** into the log once (`The client has not ticked for … ms - writing a thread dump`). If
   the game ever hangs, that dump identifies the stuck thread - please keep it when reporting.
 
@@ -266,11 +268,10 @@ push the sound behind the picture.
    sits above the panorama but **beneath the title screen buttons** - so hover highlights, the hand
    cursor and clicks always belong to the buttons.
 
-The title screen is rendered *underneath* the loading overlay, so it draws the same video layer while the
+The title screen is rendered _underneath_ the loading overlay, so it draws the same video layer while the
 overlay is still up. That is what covers the panorama and the buttons during the overlay's fade-out - and
 it is also why nothing of the title screen can flash between the overlay disappearing and the intro
 taking over.
-
 
 ## How it works (performance notes)
 
@@ -290,7 +291,7 @@ taking over.
   more than the rest of the frame combined at 4K, and that was what made the loading video stutter.
 - The loading scene's video is **preloaded during early startup** (FFmpeg loaded before the window exists,
   first frame decoded and then paused), so it is already on screen the moment the loading screen appears.
-- With a baked single video there is exactly one *video* player and one texture for both scenes, so the
+- With a baked single video there is exactly one _video_ player and one texture for both scenes, so the
   hand-over allocates, opens and decodes nothing - and by default that same player carries the sound, which
   means picture and sound share one clock and cannot drift, and the picture always stays in one player.
 - Frames produced while the render thread is busy are dropped instead of queued.
@@ -323,25 +324,53 @@ The mod jar is large (~120 MB) because it bundles the prebuilt FFmpeg libraries 
 platforms (Windows/Linux/macOS, x86-64 and ARM64). The build already does everything possible with the
 prebuilt libraries:
 
-* Each platform's natives jar is trimmed to the libraries the player loads - `avutil`, `avcodec`,
+- Each platform's natives jar is trimmed to the libraries the player loads - `avutil`, `avcodec`,
   `avformat`, `swresample`, `swscale` plus their JavaCPP JNI wrappers. Everything else in the jar
   (`avdevice`, `avfilter`, the `ffmpeg`/`ffprobe` command line programs, GraalVM native-image metadata)
   is stripped, and what remains was verified against each library's actual `NEEDED` dependencies
   (`libavcodec` hard-links `libva`/`libavutil`/`libswresample`; `libavformat` links `libavcodec`;
   everything else is a system library) - nothing kept can be removed, and nothing removed was loadable
   without the rest.
-* The nested jars are written with maximum deflate; library payloads are stripped machine code and do
+- The nested jars are written with maximum deflate; library payloads are stripped machine code and do
   not compress further (measured: deflating harder saves kilobytes).
 
 What remains is the codecs themselves: `libavcodec` alone is 35 MB (25 MB compressed) because a prebuilt
-FFmpeg contains *all* codecs and every encoder, and a shared library cannot be slimmed after the fact.
-Playing one VP9 clip needs a fraction of that, so the only remaining lever is bundling a **custom
-minimal FFmpeg build** (`--disable-everything --enable-decoder=vp9,vorbis,opus --enable-demuxer=matroska
---enable-swscale --enable-swresample --disable-vaapi ...`), which would shrink the jar to roughly
-**45-55 MB**. That requires cross-compiling FFmpeg for all five platforms (mingw-w64, osxcross, two
-Linux targets) and maintaining custom JavaCPP bindings in CI - an infrastructure project, not a build
-flag. Smaller levers without it: shipping per-platform jars (~25 MB each, but users must pick the right
-file), or removing platforms from `ffmpegPlatforms` in `gradle/common.gradle`.
+FFmpeg contains _all_ codecs and every encoder, and a shared library cannot be slimmed after the fact.
+Playing one VP9 clip needs a fraction of that - which is what the **custom minimal build** is for:
+
+## Minimal FFmpeg build (GitHub Actions)
+
+`.github/workflows/ffmpeg.yml` builds a minimal FFmpeg (`--disable-everything`, only the Matroska
+demuxer, VP9/VP8/Opus/Vorbis decoders and parsers, the file protocol, swscale and swresample - no
+encoders, no network) **with hardware decoding included** (VAAPI + NVDEC on Linux, D3D11VA/DXVA2 on
+Windows, VideoToolbox on macOS) for all five platforms: Linux x86-64 and ARM64 natively/cross-compiled
+on Ubuntu, Windows x86-64 through mingw-w64 on Ubuntu, and macOS through the native GitHub runners. The
+sources are downloaded once and cached, the build outputs are cached against the build script's hash, the
+zips are uploaded as artifacts (90 days) **and attached to a permanent GitHub release** (`ffmpeg-min-<version>`).
+
+Because the minimal build is made from the **same FFmpeg release** the JavaCPP preset targets, the
+public ABI is identical and bytedeco's JNI wrappers work against it unchanged - only the fat codec
+payloads are gone. The zips come out at ~5 MB per platform instead of ~23 MB, shrinking the mod jar to
+roughly **40-50 MB** with all five platforms bundled.
+
+**Using the results:** the build picks the minimal libraries up automatically - set
+`ffmpeg_libraries_url` in `gradle.properties` to the release base (or rely on the default that is
+already pointed at this repository's `ffmpeg-min-<version>` release); builds inside GitHub Actions
+detect the repository from the environment on their own. The zips download once into
+`build/ffmpeg-libraries/` and are reused from there by every later build and version node. Until the
+release exists (or when a platform's zip is missing), the build warns and bundles the trimmed bytedeco
+libraries instead. A local folder works too, via `ffmpeg_libraries`:
+
+```properties
+# gradle.properties (or -P... on the command line) - either way:
+ffmpeg_libraries_url=https://github.com/Jack-the-Pro101/New-MC-Intro/releases/download/ffmpeg-min-8.1.2
+ffmpeg_libraries=<local folder with the zips>   # folder wins, if both are set
+```
+
+The build then substitutes those libraries for the bytedeco ones while nesting (per platform; platforms
+without a zip fall back to the trimmed bytedeco build with a warning). `gradle/ffmpeg/build-minimal.sh`
+is the script behind the workflow and can also be run locally (`bash gradle/ffmpeg/build-minimal.sh
+linux-x86_64`); it is what keeps the CI recipe and local builds identical.
 
 ## Licensing note
 

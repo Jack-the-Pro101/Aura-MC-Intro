@@ -1,0 +1,111 @@
+name: Build minimal FFmpeg
+
+# Builds the small FFmpeg libraries the mod bundles (VP9/Opus/Vorbis + Matroska + swscale only)
+# for every supported platform, caches them, and attaches them to a permanent GitHub release so
+# local Gradle builds can use them through the `ffmpeg_libraries` property. The release tag is
+# derived from the FFmpeg version; re-running the workflow replaces the assets.
+#
+#   gradle.properties:  ffmpeg_libraries=<folder containing the downloaded per-platform zips>
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'gradle/ffmpeg/**'
+      - '.github/workflows/ffmpeg.yml'
+
+permissions:
+  contents: write # the release upload
+
+env:
+  FFMPEG_VERSION: '8.1.2'
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            os: ubuntu-24.04
+            packages: 'libva-dev' # VAAPI decode; NVDEC headers are installed below
+          - platform: linux-arm64
+            os: ubuntu-24.04
+            packages: crossbuild-essential-arm64
+          - platform: windows-x86_64
+            os: ubuntu-24.04
+            packages: gcc-mingw-w64-x86-64
+          - platform: macosx-arm64
+            os: macos-14
+            packages: ''
+          - platform: macosx-x86_64
+            os: macos-13
+            packages: nasm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            if [ -n "${{ matrix.packages }}" ]; then brew install ${{ matrix.packages }}; fi
+          else
+            sudo apt-get update
+            sudo apt-get install -y nasm ${{ matrix.packages }}
+          fi
+
+      - name: Install nv-codec-headers (NVIDIA NVDEC, linux-x86_64 only)
+        if: matrix.platform == 'linux-x86_64'
+        run: |
+          git clone --depth 1 -b n12.2.72.0 https://github.com/FFmpeg/nv-codec-headers.git /tmp/nv-codec-headers
+          make -C /tmp/nv-codec-headers install PREFIX=/usr
+
+      - name: Cache FFmpeg sources
+        uses: actions/cache@v4
+        with:
+          path: sources
+          key: ffmpeg-src-${{ env.FFMPEG_VERSION }}
+
+      - name: Cache build output
+        id: build-cache
+        uses: actions/cache@v4
+        with:
+          path: out
+          key: ffmpeg-min-${{ env.FFMPEG_VERSION }}-${{ matrix.platform }}-${{ hashFiles('gradle/ffmpeg/build-minimal.sh') }}
+
+      - name: Build
+        if: steps.build-cache.outputs.cache-hit != 'true'
+        run: bash gradle/ffmpeg/build-minimal.sh ${{ matrix.platform }}
+        env:
+          FFMPEG_VERSION: ${{ env.FFMPEG_VERSION }}
+
+      - name: Upload build artifact (kept 90 days)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-min-${{ env.FFMPEG_VERSION }}-${{ matrix.platform }}
+          path: out/ffmpeg-min-${{ env.FFMPEG_VERSION }}-${{ matrix.platform }}.zip
+          retention-days: 90
+          if-no-files-found: error
+
+  release:
+    name: Attach libraries to the release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all platform zips
+        uses: actions/download-artifact@v4
+        with:
+          path: zips
+          merge-multiple: true
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ffmpeg-min-${{ env.FFMPEG_VERSION }}
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "Minimal FFmpeg ${{ env.FFMPEG_VERSION }}" \
+              --notes "Minimal FFmpeg shared libraries built by the ffmpeg.yml workflow. Download the zip for your platform into a folder and point the Gradle property \`ffmpeg_libraries\` at it to bundle these instead of the bytedeco builds."
+          gh release upload "$TAG" zips/*.zip --repo "$GITHUB_REPOSITORY" --clobber

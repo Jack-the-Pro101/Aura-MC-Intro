@@ -97,6 +97,13 @@ public interface VideoPlayer {
         return false;
     }
 
+    /**
+     * Lets the backend use hardware decoding when the platform provides it, with an automatic
+     * fallback to software decoding when it does not work.
+     */
+    default void setHardwareDecoding(boolean hardwareDecoding) {
+    }
+
     /** Enables verbose backend logging (used by the "debug logging" config option). */
     default void setDebugLogging(boolean debug) {
     }

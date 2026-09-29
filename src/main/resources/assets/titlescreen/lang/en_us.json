@@ -32,6 +32,8 @@
   "text.autoconfig.titlescreen.option.video.videoFit.@Tooltip": "How the video is fitted to the screen: COVER crops, CONTAIN letterboxes, STRETCH fills.",
   "text.autoconfig.titlescreen.option.video.videoMaxFps": "Max upload FPS",
   "text.autoconfig.titlescreen.option.video.videoMaxFps.@Tooltip": "Upper bound for texture uploads per second. 0 = unlimited.",
+  "text.autoconfig.titlescreen.option.video.hardwareDecoding": "Hardware decoding",
+  "text.autoconfig.titlescreen.option.video.hardwareDecoding.@Tooltip": "Decode the video on the GPU: D3D11VA on Windows, VideoToolbox on macOS, VAAPI (Intel/AMD) or NVDEC (NVIDIA) on Linux. Falls back to software decoding automatically when no working hardware decoder is found.",
 
   "text.autoconfig.titlescreen.option.timing": "Timing (relative to video start)",
   "text.autoconfig.titlescreen.option.timing.videoStartDelayMs": "Video start delay (ms)",

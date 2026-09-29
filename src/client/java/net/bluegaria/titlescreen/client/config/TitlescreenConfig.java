@@ -150,6 +150,14 @@ public class TitlescreenConfig implements ConfigData {
         @ConfigEntry.Gui.Tooltip
         @ConfigEntry.BoundedDiscrete(min = 0, max = 240)
         public int videoMaxFps = 60;
+
+        /**
+         * Decode the video on the GPU where the platform provides it (D3D11VA on Windows,
+         * VideoToolbox on macOS, VAAPI/NVDEC on Linux), falling back to software decoding
+         * automatically when no working hardware decoder is found.
+         */
+        @ConfigEntry.Gui.Tooltip
+        public boolean hardwareDecoding = true;
     }
 
     public static class Timing {
