@@ -1,6 +1,6 @@
 # Titlescreen
 
-A Fabric mod for Minecraft **26.2** that replaces the vanilla loading/title screen presentation with a
+A Fabric mod for Minecraft **1.21.10, 1.21.11, 26.1, 26.2 and 26.3** that replaces the vanilla loading/title screen presentation with a
 configurable **video intro** - typically one baked clip that covers the whole start-up:
 
 - the video is drawn behind the vanilla loading bar from the moment the window appears,
@@ -24,7 +24,8 @@ Everything is configurable in-game through **Mod Menu → Config** (Cloth Config
 
 ## Requirements
 
-1. **Minecraft 26.2 + Fabric Loader ≥ 0.19.5** (Fabric API is required).
+1. **Minecraft 1.21.10 / 1.21.11 / 26.1 / 26.2 / 26.3 + Fabric Loader ≥ 0.19.5** (Fabric API is required).
+   Each release jar declares exactly the versions it was built against, so launchers pick the right file.
 2. **libVLC** installed on the system - video decoding is delegated to libVLC through
    [vlcj](https://github.com/caprica/vlcj). It is auto-detected, but *where* it must be installed differs
    per platform:
@@ -345,12 +346,15 @@ taking over.
 
 - libVLC decodes on its own native threads; the game thread copies the newest decoded frame straight into
   the texture's pixels (one copy, one upload per displayed frame, throttled by the max-FPS options) and
-  draws it through the vanilla GUI render pipeline, so it composes with the new 26.2 render-state system.
+  draws it through the vanilla GUI render pipeline (the render-state system on 26.x, immediate
+  `GuiGraphics` drawing on 1.21.x).
 - Frames are kept at the video's native size and handed to libVLC with our own buffer format: no scaler
   inside libVLC (that crashed natively more than once) and no resampling pass in Java.
 - The video is drawn with a **linear, clamp-to-edge** sampler instead of the nearest/repeat one Minecraft
   creates dynamic textures with, so scaling the clip to the screen is filtered rather than point-sampled
   (that point sampling is what made the picture look blocky and jagged next to a video player's scaler).
+  The 26.x builds use their own sampler for this; on 1.21.x the GUI pipeline picks the sampler, so the
+  picture is drawn the way vanilla blits any texture there.
 - Everything that can be done off the render thread is: an opaque scene's alpha is dropped while libVLC's
   thread writes the frame, which is where the spare time is. Doing it per pixel on the render thread cost
   more than the rest of the frame combined at 4K, and that was what made the loading video stutter.
@@ -368,9 +372,21 @@ taking over.
 
 ## Building
 
+The project is a [Stonecutter](https://stonecutter.kikugie.dev) multi-version project: one shared source
+tree in `src/`, built once per supported Minecraft version (see `settings.gradle` and the per-version
+properties in `versions/<mc>/gradle.properties`).
+
 ```bash
-./gradlew build
+./gradlew build            # builds the active version (26.2, see stonecutter.gradle)
+./gradlew :1.21.10:build   # builds one specific version
+./gradlew :1.21.10:build :1.21.11:build :26.1:build :26.2:build :26.3:build
 ```
+
+Each build lands in `versions/<mc>/build/libs/` as `Titlescreen-<mod version>+<mc>.jar`. The 1.21.x
+builds are remapped to intermediary names (classic Fabric tooling, `fabric-loom-remap`), while the 26.x
+builds compile directly against the unobfuscated jars (loom's non-obfuscated mode). Version-specific
+API differences are handled with Stonecutter comment conditions (`//? if ...`) and name swaps in
+`gradle/common.gradle`, so the same sources build everywhere.
 
 ## Licensing note
 

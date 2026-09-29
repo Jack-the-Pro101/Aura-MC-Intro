@@ -76,14 +76,18 @@ public abstract class TitleScreenMixin {
     }
 
     /**
-     * The version/mod-count line at the bottom left is drawn with {@code ARGB.white(fade)}, where the fade
-     * is vanilla's own screen fade. Scaling that alpha is what makes it start transparent and fade in on
-     * the configured timetable like the buttons - by the time the video hands the screen over, vanilla's
-     * fade is already finished, so it was always fully visible.
+     * The version/mod-count line at the bottom left is drawn with a colour that has vanilla's own
+     * screen fade as its alpha. Scaling that alpha is what makes it start transparent and fade in on
+     * the configured timetable like the buttons - by the time the video hands the screen over,
+     * vanilla's fade is already finished, so it was always fully visible.
      */
     @ModifyExpressionValue(
             method = "extractRenderState",
+            //? if 1.21.10 {
+            /*at = @At(value = "INVOKE", target = "Lnet/minecraft/util/ARGB;color(FI)I"))
+            *///?} else {
             at = @At(value = "INVOKE", target = "Lnet/minecraft/util/ARGB;white(F)I"))
+            //?}
     private int titlescreen$fadeVersionText(int original) {
         return TitlescreenVideoManager.get().scaleTitleTextAlpha(original);
     }

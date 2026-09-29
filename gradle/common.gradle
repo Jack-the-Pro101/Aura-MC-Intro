@@ -1,0 +1,196 @@
+// Common node configuration, shared by all Minecraft versions. Applied from the
+// per-node build scripts (build.gradle for 26.x, build.remap.gradle for 1.21.x),
+// which differ only in the loom plugin variant and the dependency configurations.
+//
+// This script runs once for every supported Minecraft version (see settings.gradle).
+// Version-specific values live in versions/<mc>/gradle.properties, shared values in
+// the root gradle.properties. sc.current.version is the current node's MC version.
+
+// Mod version is suffixed with the Minecraft version, e.g. Titlescreen-1.0-SNAPSHOT+26.2.jar
+version = "${project.mod_version}+${sc.current.version}"
+group = project.maven_group
+
+base {
+    archivesName = project.archives_base_name
+}
+
+loom {
+    splitEnvironmentSourceSets()
+
+    mods {
+        "titlescreen" {
+            sourceSet sourceSets.main
+            sourceSet sourceSets.client
+        }
+    }
+}
+
+stonecutter {
+    // The shared source is written against the 26.x API; 1.21.x builds get the 1.21
+    // names swapped in. The replacements are direction-based and reversible: on 26.x
+    // nodes the reverse rewrite is a no-op, because text already in the "output" form
+    // is preserved by the replacement engine. Patterns are deliberately long (quotes,
+    // semicolons, whole statements) so they only ever match mixin/annotation strings.
+    replacements.string(sc.current.parsed.matches('<26.1')) {
+        // Immediate GuiGraphics rendering on 1.21.x vs the GuiGraphicsExtractor pipeline on 26.x
+        replace 'GuiGraphicsExtractor', 'GuiGraphics'
+        // Mixin method attributes and descriptor targets (quoted, so they only match annotation strings)
+        replace 'method = "extractRenderState"', 'method = "render"'
+        replace ';extractRenderState(', ';render('
+        replace 'method = "extractIcons"', 'method = "drawIcons"'
+        replace 'method = "extractProgressBar"', 'method = "drawProgressBar"'
+        // The logo fade is a named method on 1.21.x with its own descriptor
+        replace '"extractRenderState(Lnet/minecraft/client/gui/GuiGraphicsExtractor;IF)V"',
+                '"renderLogo(Lnet/minecraft/client/gui/GuiGraphics;IF)V"'
+    }
+    replacements.string(sc.current.parsed.matches('1.21.10')) {
+        // ResourceLocation was still called that in 1.21.10, and Util lives one package up
+        replace 'Identifier', 'ResourceLocation'
+        replace 'import net.minecraft.util.Util;', 'import net.minecraft.Util;'
+    }
+    replacements.string(sc.current.parsed.matches('>=26.3')) {
+        // 26.3 moved the render pipeline and texture types into the renderpearl API
+        replace 'com.mojang.blaze3d.pipeline', 'com.mojang.renderpearl.api.pipeline'
+        replace 'com/mojang/blaze3d/pipeline', 'com/mojang/renderpearl/api/pipeline'
+        replace 'com.mojang.blaze3d.textures', 'com.mojang.renderpearl.api.textures'
+        replace 'com/mojang/blaze3d/textures', 'com/mojang/renderpearl/api/textures'
+    }
+}
+
+fabricApi {
+    configureDataGeneration {
+        client = true
+    }
+}
+
+repositories {
+    // Modrinth maven - used for Mod Menu, Placeholder API and Cloth Config
+    maven {
+        name = 'Modrinth'
+        url = 'https://api.modrinth.com/maven'
+        content {
+            includeGroup "maven.modrinth"
+        }
+    }
+}
+
+dependencies {
+    // To change the versions see the versions/<mc>/gradle.properties file
+    minecraft "com.mojang:minecraft:${sc.current.version}"
+
+    // 1.21.x ships obfuscated jars (remapping loom variant), 26.x does not.
+    if (sc.current.parsed.matches('<26.1')) {
+        // Obfuscated environment (1.21.x): dependencies must be remapped to the
+        // compile mappings, and the built jar is remapped to intermediary names.
+        mappings loom.officialMojangMappings()
+        modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+        modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+
+        // Cloth Config - in-game config screen (bundled so users do not have to install it themselves)
+        modImplementation "maven.modrinth:cloth-config:${project.cloth_config_version}"
+        include "maven.modrinth:cloth-config:${project.cloth_config_version}"
+
+        // Mod Menu - optional integration, deliberately NOT bundled
+        modImplementation "maven.modrinth:modmenu:${project.modmenu_version}"
+        // Mod Menu requires Placeholder API at runtime; only needed for the dev environment
+        modRuntimeOnly "maven.modrinth:placeholder-api:${project.placeholder_api_version}"
+    } else {
+        // Non-obfuscated environment (26.x): no remapping configurations exist,
+        // mods are consumed on the plain configurations.
+        implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+        implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+
+        // Cloth Config - in-game config screen (bundled so users do not have to install it themselves)
+        implementation "maven.modrinth:cloth-config:${project.cloth_config_version}"
+        include "maven.modrinth:cloth-config:${project.cloth_config_version}"
+
+        // Mod Menu - optional integration, deliberately NOT bundled
+        implementation "maven.modrinth:modmenu:${project.modmenu_version}"
+        // Mod Menu requires Placeholder API at runtime; only needed for the dev environment
+        runtimeOnly "maven.modrinth:placeholder-api:${project.placeholder_api_version}"
+    }
+
+    // MixinExtras is shipped by the loader at runtime; this is only for compile-time annotations.
+    compileOnly "io.github.llamalad7:mixinextras-fabric:0.5.5"
+
+    // Video playback. vlcj is a JNA binding for libVLC (a system installation of VLC is required).
+    // vlcj-natives holds vlcj's native-discovery support classes and must be bundled as well,
+    // otherwise class loading fails in production (dev classpaths resolve it transitively).
+    implementation "uk.co.caprica:vlcj:${project.vlcj_version}"
+    implementation "uk.co.caprica:vlcj-natives:${project.vlcj_natives_version}"
+    if (project.bundle_video_libraries.toBoolean()) {
+        include "uk.co.caprica:vlcj:${project.vlcj_version}"
+        include "uk.co.caprica:vlcj-natives:${project.vlcj_natives_version}"
+        include "net.java.dev.jna:jna:${project.jna_version}"
+        include "net.java.dev.jna:jna-platform:${project.jna_version}"
+    }
+}
+
+// Both resource tasks (main and client source sets) fill in the version placeholders
+// for fabric.mod.json and the mixin config.
+def expandProps = [
+        "version"                : project.version.toString(),
+        "minecraft_version"      : sc.current.version,
+        "loader_version"         : project.loader_version.toString(),
+        "minecraft_dependency"   : project.minecraft_dependency.toString(),
+        "cloth_config_dependency": project.cloth_config_dependency.toString(),
+        "modmenu_dependency"     : project.modmenu_dependency.toString(),
+        "mixin_compat"           : project.mixin_compat.toString(),
+        "versioned_mixins"       : project.versioned_mixins.toString()
+]
+
+tasks.withType(ProcessResources).configureEach {
+    inputs.properties(expandProps)
+    filteringCharset "UTF-8"
+
+    filesMatching(["fabric.mod.json", "titlescreen.client.mixins.json", "titlescreen.versioned.mixins.json"]) {
+        expand expandProps
+    }
+}
+
+def targetJavaVersion = (project.java_target as String).toInteger()
+tasks.withType(JavaCompile).configureEach {
+    // ensure that the encoding is set to UTF-8, no matter what the system default is
+    // this fixes some edge cases with special characters not displaying correctly
+    // see http://yodaconditions.net/blog/fix-for-java-file-encoding-problems-with-gradle.html
+    // If Javadoc is generated, this must be specified in that task too.
+    it.options.encoding = "UTF-8"
+    if (targetJavaVersion >= 10 || JavaVersion.current().isJava10Compatible()) {
+        it.options.release.set(targetJavaVersion)
+    }
+}
+
+java {
+    def javaVersion = JavaVersion.toVersion(targetJavaVersion)
+    if (JavaVersion.current() < javaVersion) {
+        toolchain.languageVersion = JavaLanguageVersion.of(targetJavaVersion)
+    }
+    // Loom will automatically attach sourcesJar to a RemapSourcesJar task and to the "build" task
+    // if it is present.
+    // If you remove this line, sources will not be generated.
+    withSourcesJar()
+}
+
+jar {
+    from("LICENSE") {
+        rename { "${it}_${project.archives_base_name}" }
+    }
+}
+
+// configure the maven publication
+publishing {
+    publications {
+        create("mavenJava", MavenPublication) {
+            artifactId = project.archives_base_name
+            from components.java
+        }
+    }
+
+    // See https://docs.gradle.org/current/userguide/publishing_maven.html for information on how to set up publishing.
+    repositories {
+        // Add repositories to publish to here.
+        // Notice: This block does NOT have the same function as the block in the top level.
+        // The repositories here will be used for publishing your artifact, not for
+        // retrieving dependencies.
+    }
+}

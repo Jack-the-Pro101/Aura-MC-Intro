@@ -4,6 +4,29 @@ pluginManagement {
             name = 'Fabric'
             url = 'https://maven.fabricmc.net/'
         }
+        maven {
+            name = 'Kikugie'
+            url = 'https://maven.kikugie.dev/releases'
+        }
         gradlePluginPortal()
+    }
+}
+
+plugins {
+    id 'dev.kikugie.stonecutter' version '0.9.8'
+}
+
+// Multi-version setup: one shared source tree in src/, built once per Minecraft
+// version registered below. The shared build.gradle acts as the version template.
+stonecutter {
+    // Use the Groovy DSL (stonecutter defaults to Kotlin)
+    kotlinController = false
+    centralScript = 'build.gradle'
+
+    create(getRootProject()) {
+        // 1.21.x ships obfuscated jars -> loom's remapping variant
+        versions('1.21.10', '1.21.11').buildscript('build.remap.gradle')
+        // 26.x ships unobfuscated jars -> loom's non-obfuscated variant
+        versions('26.1', '26.2', '26.3').buildscript('build.gradle')
     }
 }

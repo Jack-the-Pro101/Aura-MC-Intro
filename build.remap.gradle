@@ -1,0 +1,10 @@
+// Shared build script for the 1.21.x nodes. Those versions still ship obfuscated
+// jars, so loom runs in its remapping mode (`fabric-loom-remap`): dependencies are
+// declared on the mod* configurations and the built jar is remapped to intermediary
+// names, exactly like classic Fabric tooling. See gradle/common.gradle.
+plugins {
+    id 'net.fabricmc.fabric-loom-remap' version '1.17-SNAPSHOT'
+    id 'maven-publish'
+}
+
+apply from: rootProject.file('gradle/common.gradle')

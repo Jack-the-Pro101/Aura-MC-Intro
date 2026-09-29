@@ -1,10 +1,16 @@
 package net.bluegaria.titlescreen.client.video;
 
 import com.mojang.blaze3d.systems.RenderSystem;
+//? if >=26.1 {
 import com.mojang.blaze3d.textures.FilterMode;
 import com.mojang.blaze3d.textures.GpuSampler;
+//?}
 import net.bluegaria.titlescreen.client.config.TitlescreenConfig;
+//? if >=26.1 {
 import net.bluegaria.titlescreen.mixin.client.GuiGraphicsExtractorInvoker;
+//?} else {
+/*import net.bluegaria.titlescreen.mixin.client.GuiGraphicsInvoker;
+*///?}
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.renderer.RenderPipelines;
@@ -141,6 +147,9 @@ public final class VideoTextureLayer {
         }
 
         float[] rect = fitRect(fit, aspectWidth, aspectHeight, guiWidth, guiHeight);
+        // The 1.21.x branch below: GuiGraphics.innerBlit takes its int coordinates as
+        // (x0, x1, y0, y1) - see GuiGraphicsInvoker for details.
+        //? if >=26.1 {
         ((GuiGraphicsExtractorInvoker) graphics).titlescreen$innerBlit(
                 RenderPipelines.GUI_TEXTURED,
                 target.getTextureView(),
@@ -148,9 +157,18 @@ public final class VideoTextureLayer {
                 Math.round(rect[0]), Math.round(rect[1]), Math.round(rect[2]), Math.round(rect[3]),
                 rect[4], rect[5], rect[6], rect[7],
                 ARGB.white(alpha));
+        //?} else {
+        /*((GuiGraphicsInvoker) graphics).titlescreen$innerBlit(
+                RenderPipelines.GUI_TEXTURED,
+                this.identifier,
+                Math.round(rect[0]), Math.round(rect[2]), Math.round(rect[1]), Math.round(rect[3]),
+                rect[4], rect[5], rect[6], rect[7],
+                ARGB.white(alpha));
+        *///?}
         return true;
     }
 
+    //? if >=26.1 {
     /**
      * The sampler the video is drawn with.
      *
@@ -164,6 +182,7 @@ public final class VideoTextureLayer {
     private static GpuSampler videoSampler() {
         return RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR);
     }
+    //?}
 
     public void release(TextureManager textureManager) {
         DynamicTexture current = this.texture;

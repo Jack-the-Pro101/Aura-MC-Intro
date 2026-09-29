@@ -2,7 +2,7 @@ package net.bluegaria.titlescreen.client;
 
 import com.terraformersmc.modmenu.api.ConfigScreenFactory;
 import com.terraformersmc.modmenu.api.ModMenuApi;
-import me.shedaniel.autoconfig.AutoConfigClient;
+import net.bluegaria.titlescreen.client.compat.McCompat;
 import net.bluegaria.titlescreen.client.config.TitlescreenConfig;
 
 /**
@@ -12,6 +12,6 @@ public class TitlescreenModMenu implements ModMenuApi {
 
     @Override
     public ConfigScreenFactory<?> getModConfigScreenFactory() {
-        return parent -> AutoConfigClient.getConfigScreen(TitlescreenConfig.class, parent).get();
+        return parent -> McCompat.configScreen(TitlescreenConfig.class, parent);
     }
 }

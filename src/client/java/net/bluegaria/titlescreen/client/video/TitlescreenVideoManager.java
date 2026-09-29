@@ -1,5 +1,6 @@
 package net.bluegaria.titlescreen.client.video;
 
+import net.bluegaria.titlescreen.client.compat.McCompat;
 import net.bluegaria.titlescreen.client.config.TitlescreenConfig;
 import net.bluegaria.titlescreen.client.config.TitlescreenConfigHolder;
 import net.bluegaria.titlescreen.mixin.client.LoadingOverlayAccessor;
@@ -262,7 +263,7 @@ public final class TitlescreenVideoManager {
         }
 
 
-        Overlay overlay = minecraft.gui.overlay();
+        Overlay overlay = McCompat.currentOverlay(minecraft);
         LoadingOverlay loadingOverlay = overlay instanceof LoadingOverlay candidate ? candidate : null;
         boolean replayAllowed = !this.introPlayedOnce || cfg.general.replayOnResourceReload;
         // Loading is finished once the overlay is ready to fade - or once vanilla has already dropped it,
@@ -316,7 +317,8 @@ public final class TitlescreenVideoManager {
         }
 
         // Leaving the title screen (options, world select, ...) ends the intro for good.
-        if (minecraft.gui.screen() != null && !(minecraft.gui.screen() instanceof TitleScreen)) {
+        Screen currentScreen = McCompat.currentScreen(minecraft);
+        if (currentScreen != null && !(currentScreen instanceof TitleScreen)) {
             stopSession(minecraft);
         }
     }
@@ -765,12 +767,13 @@ public final class TitlescreenVideoManager {
         } catch (Throwable t) {
             LOGGER.warn("Failed to finish the loading overlay cleanly", t);
         }
-        minecraft.gui.setOverlay(null);
+        McCompat.clearOverlay(minecraft);
 
         // Vanilla re-initialises the screen right after onFinish, mirror that here.
-        Screen screen = minecraft.gui.screen();
+        Screen screen = McCompat.currentScreen(minecraft);
         if (screen != null) {
-            screen.init(minecraft.getWindow().getGuiScaledWidth(), minecraft.getWindow().getGuiScaledHeight());
+            McCompat.reinitScreen(screen, minecraft,
+                    minecraft.getWindow().getGuiScaledWidth(), minecraft.getWindow().getGuiScaledHeight());
         }
         if (cfg.general.debugLogging) {
             LOGGER.info("Loading overlay unloaded at video timestamp {} ms", videoTimeMs());
@@ -1553,7 +1556,7 @@ public final class TitlescreenVideoManager {
             return;
         }
         traceHandOver("title draw", "alpha=" + alpha + " introFramesUploaded=" + this.introFramesUploaded
-                + " overlayPresent=" + (Minecraft.getInstance().gui.overlay() != null));
+                + " overlayPresent=" + (McCompat.currentOverlay(Minecraft.getInstance()) != null));
         this.introTexture.draw(graphics, this.player, cfg.video.videoFit, alpha);
     }
 

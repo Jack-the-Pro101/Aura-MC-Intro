@@ -1,0 +1,7 @@
+// Stonecutter project controller: the "active" version determines which state
+// the shared src/ directory reflects in the IDE and in dev runs.
+plugins {
+    id 'dev.kikugie.stonecutter'
+}
+
+stonecutter.active '26.2'

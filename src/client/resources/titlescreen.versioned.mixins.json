@@ -4,13 +4,7 @@
   "package": "net.bluegaria.titlescreen.mixin.client",
   "compatibilityLevel": "${mixin_compat}",
   "client": [
-    "AbstractWidgetMixin",
-    "LoadingOverlayAccessor",
-    "LoadingOverlayMixin",
-    "LogoRendererMixin",
-    "RealmsNotificationsScreenMixin",
-    "ScreenMixin",
-    "TitleScreenMixin"
+    ${versioned_mixins}
   ],
   "injectors": {
     "defaultRequire": 1

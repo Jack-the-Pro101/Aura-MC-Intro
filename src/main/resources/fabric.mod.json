@@ -26,15 +26,19 @@
     {
       "config": "titlescreen.client.mixins.json",
       "environment": "client"
+    },
+    {
+      "config": "titlescreen.versioned.mixins.json",
+      "environment": "client"
     }
   ],
   "depends": {
     "fabricloader": ">=${loader_version}",
     "fabric-api": "*",
-    "minecraft": "${minecraft_version}",
-    "cloth-config": ">=26.2"
+    "minecraft": "${minecraft_dependency}",
+    "cloth-config": "${cloth_config_dependency}"
   },
   "suggests": {
-    "modmenu": ">=20.0.0"
+    "modmenu": "${modmenu_dependency}"
   }
 }
