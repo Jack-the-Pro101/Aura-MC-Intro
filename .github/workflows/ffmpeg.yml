@@ -69,24 +69,37 @@ jobs:
           path: sources
           key: ffmpeg-src-${{ env.FFMPEG_VERSION }}
 
-      - name: Cache build output
+      - name: Restore build output
         id: build-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: out
           key: ffmpeg-min-${{ env.FFMPEG_VERSION }}-${{ matrix.platform }}-${{ hashFiles('gradle/ffmpeg/build-minimal.sh') }}
 
       - name: Build
-        if: steps.build-cache.outputs.cache-hit != 'true'
+        # Also rebuild when a restored cache lacks the expected zip (for example
+        # one saved by an older run) instead of failing later at the upload step.
+        if: success() && (steps.build-cache.outputs.cache-hit != 'true' || hashFiles(format('out/ffmpeg-{0}-min-{1}.zip', env.FFMPEG_VERSION, matrix.platform)) == '')
         run: bash gradle/ffmpeg/build-minimal.sh ${{ matrix.platform }}
         env:
           FFMPEG_VERSION: ${{ env.FFMPEG_VERSION }}
 
+      # Explicit save (instead of actions/cache@v4's implicit post step) so a
+      # failed build never caches a partial out/ directory.
+      - name: Save build output
+        if: success() && steps.build-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: out
+          key: ffmpeg-min-${{ env.FFMPEG_VERSION }}-${{ matrix.platform }}-${{ hashFiles('gradle/ffmpeg/build-minimal.sh') }}
+
       - name: Upload build artifact (kept 90 days)
         uses: actions/upload-artifact@v4
         with:
-          name: ffmpeg-min-${{ env.FFMPEG_VERSION }}-${{ matrix.platform }}
-          path: out/ffmpeg-min-${{ env.FFMPEG_VERSION }}-${{ matrix.platform }}.zip
+          name: ffmpeg-${{ env.FFMPEG_VERSION }}-min-${{ matrix.platform }}
+          # Must match the zip name build-minimal.sh produces (and the name
+          # gradle/common.gradle downloads from the release): ffmpeg-<version>-min-<platform>.zip
+          path: out/ffmpeg-${{ env.FFMPEG_VERSION }}-min-${{ matrix.platform }}.zip
           retention-days: 90
           if-no-files-found: error
 
