@@ -25,7 +25,7 @@ import org.slf4j.LoggerFactory;
  * Owns the GPU texture for one scene's video and knows how to draw it through Minecraft's GUI render
  * state.
  *
- * <p>libVLC scales the decoded picture into an alignment padded buffer, so the whole texture is drawn
+ * <p>The decoded picture arrives in its own buffer, so the whole texture is drawn
  * while the aspect ratio for the destination rectangle comes from the real track size
  * ({@link VideoPlayer#sourceWidth()}). Frames themselves are copied in by {@link VideoFrameSink}.</p>
  */
@@ -85,7 +85,7 @@ public final class VideoTextureLayer {
     /**
      * The texture a frame of this size should go into.
      *
-     * <p>When the size changes (libVLC reallocates its buffer, which happens when a preloaded video starts
+     * <p>When the size changes (the decoder reallocates its buffer, which happens when a preloaded video starts
      * playing) a new texture is prepared off to the side instead of replacing the one on screen: a fresh
      * texture is empty, and drawing it - it is blended - let the title screen's panorama and buttons flash
      * through until the next frame arrived.</p>

@@ -1,8 +1,6 @@
 package net.bluegaria.titlescreen.client;
 
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
-import net.bluegaria.titlescreen.client.video.VlcNativeLibrary;
+import net.bluegaria.titlescreen.client.video.FfmpegNativeLibrary;
 import net.fabricmc.loader.api.FabricLoader;
 import net.fabricmc.loader.api.entrypoint.PreLaunchEntrypoint;
 import org.slf4j.Logger;
@@ -14,13 +12,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 /**
- * Starts libVLC's native loading before the game's own main, i.e. before the window exists.
+ * Loads the bundled FFmpeg libraries before the game's own main, i.e. before the window exists.
  *
  * <p>The loading screen background video is supposed to be on screen with its first frame the moment
- * the window appears, but loading libVLC and its plugin dependencies takes about a second. Doing that
- * from the client initializer happens after the window has been created, so the first rendered frames
- * still showed the vanilla loading background. This entrypoint buys that second back; the native
- * preparation is cached in {@link VlcNativeLibrary}, so the regular preload later is a no-op.</p>
+ * the window appears, but extracting and loading the libraries takes a moment. Doing that from the
+ * client initializer happens after the window has been created, so the first rendered frames still
+ * showed the vanilla loading background. This entrypoint buys that time back; the preparation is
+ * cached in {@link FfmpegNativeLibrary}, so the regular preload later is a no-op.</p>
  */
 public class TitlescreenPreLaunch implements PreLaunchEntrypoint {
 
@@ -28,36 +26,27 @@ public class TitlescreenPreLaunch implements PreLaunchEntrypoint {
 
     @Override
     public void onPreLaunch() {
-        Settings settings = readSettings();
-        if (settings.debug()) {
-            LOGGER.info("Pre-launch: loading libVLC's native libraries early so the loading video's first "
-                    + "frame is ready when the window appears");
+        if (debugLogging()) {
+            LOGGER.info("Pre-launch: loading the bundled FFmpeg libraries early so the loading video's "
+                    + "first frame is ready when the window appears");
         }
-        VlcNativeLibrary.warmUp(settings.libVlcPath());
-    }
-
-    /** The two config values this early entry point needs. */
-    private record Settings(String libVlcPath, boolean debug) {
+        FfmpegNativeLibrary.warmUp();
     }
 
     /**
-     * Reads the configured libVLC folder straight from the config file: Cloth Config's own holder is not
-     * available yet this early, and the native directory cache is filled only once, so it has to be the
-     * same path the game would use later.
+     * Reads the debug-logging switch straight from the config file: Cloth Config's own holder is not
+     * available yet this early, and the log line above only matters when it is on.
      */
-    private static Settings readSettings() {
+    private static boolean debugLogging() {
         Path file = FabricLoader.getInstance().getConfigDir().resolve("titlescreen.json");
         try (Reader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
-            JsonObject general = JsonParser.parseReader(reader).getAsJsonObject()
-                    .getAsJsonObject("general");
-            if (general != null) {
-                String path = general.has("libVlcPath") ? general.get("libVlcPath").getAsString() : "";
-                boolean debug = general.has("debugLogging") && general.get("debugLogging").getAsBoolean();
-                return new Settings(path, debug);
-            }
+            var general = com.google.gson.JsonParser.parseReader(reader)
+                    .getAsJsonObject().getAsJsonObject("general");
+            return general != null && general.has("debugLogging")
+                    && general.get("debugLogging").getAsBoolean();
         } catch (Throwable t) {
             LOGGER.debug("Could not read the titlescreen config from {} before launch", file, t);
+            return false;
         }
-        return new Settings("", false);
     }
 }

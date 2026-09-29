@@ -98,8 +98,8 @@ public class TitlescreenConfig implements ConfigData {
     public static class Video {
         /**
          * Path to the intro video, relative to the Minecraft game directory (or an absolute path). When a
-         * file is there it is used; otherwise the mod's own bundled video plays. .webm with VP8/VP9 alpha
-         * plus an audio track is recommended for transparency + sound.
+         * file is there it is used; otherwise the mod's own bundled video plays. A .webm with VP9 video
+         * and an Opus/Vorbis audio track is recommended.
          */
         @ConfigEntry.Gui.Tooltip
         public String videoPath = "config/titlescreen/intro.webm";
@@ -113,7 +113,7 @@ public class TitlescreenConfig implements ConfigData {
          * Play a baked video's sound in the video player instead of a separate audio-only player.
          *
          * <p>On by default: one player has one clock, so picture and sound cannot drift apart and no delay is
-         * needed, and libVLC keeps the sound on time by dropping late video frames. The alternative - a
+         * needed, and the decoder keeps the sound on time by dropping late video frames. The alternative - a
          * separate audio player - is immune to a slow video pipeline, but then the two clocks have to be
          * lined up by hand with {@link #audioDelayMs}.</p>
          */
@@ -143,23 +143,6 @@ public class TitlescreenConfig implements ConfigData {
         @ConfigEntry.Gui.Tooltip
         @ConfigEntry.BoundedDiscrete(min = 0, max = 240)
         public int videoMaxFps = 60;
-
-
-        /**
-         * Decode with the GPU. On by default: software decoding of a 4K source cannot keep up, which shows
-         * up as a video that stutters and then ends after a handful of frames. libVLC falls back to its
-         * software decoder when the driver cannot handle the stream, so this is safe to leave on. Turn it
-         * off only if the video fails to appear at all.
-         */
-        @ConfigEntry.Gui.Tooltip
-        public boolean hardwareDecoding = true;
-
-        /**
-         * Optional folder containing libvlc. Leave empty to auto-detect an installed VLC
-         * (the usual case on Windows/macOS and when the vlc package is installed on Linux).
-         */
-        @ConfigEntry.Gui.Tooltip
-        public String libVlcPath = "";
     }
 
     public static class Timing {

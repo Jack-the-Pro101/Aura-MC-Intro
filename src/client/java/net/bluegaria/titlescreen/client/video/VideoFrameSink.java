@@ -9,15 +9,15 @@ import org.slf4j.LoggerFactory;
 import java.nio.ByteBuffer;
 
 /**
- * Bridges libVLC's frame callback thread with the render thread.
+ * Bridges the decoder's frame-producing thread with the render thread.
  *
- * <p>libVLC writes a whole RGBA frame (top-down) into one of two staging buffers and publishes it; the
+ * <p>The decoder writes a whole RGBA frame (top-down) into one of two staging buffers and publishes it; the
  * render thread copies the newest published frame straight into the texture's {@link NativeImage} and
  * uploads it. Frames produced while the render thread is busy are dropped, which is what an intro video
  * wants - a late frame is worse than a skipped one.</p>
  *
  * <p>Everything the render thread does per frame is one copy plus the upload. In particular the alpha
- * masking for an opaque scene happens on libVLC's thread (see {@link #setForceOpaque}), where there is
+ * masking for an opaque scene happens on the decode thread (see {@link #setForceOpaque}), where there is
  * spare time: doing it per pixel on the render thread cost more than everything else in the frame
  * combined at 4K.</p>
  */
@@ -63,15 +63,15 @@ public final class VideoFrameSink {
     }
 
     /**
-     * Producer side. Called from a libVLC native thread.
+     * Producer side. Called from the decoder's frame thread.
      *
      * @param source        direct buffer holding the first video plane
      * @param sourcePitch   row stride (in bytes) of the source plane
      * @param frameWidth    width of the decoded picture
      * @param frameHeight   height of the decoded picture
-     * @param visibleWidth  width of the visible picture (libVLC pads the buffer to an aligned size)
+     * @param visibleWidth  width of the visible picture
      * @param visibleHeight height of the visible picture
-     * @param bgrFallback   libVLC could not give us RGBA, so the frame is BGRX and has to be swizzled
+     * @param bgrFallback   the source could not give us RGBA, so the frame is BGRX and has to be swizzled
      *                      (and given an opaque alpha channel) manually
      */
     public void offerFrame(ByteBuffer source, int sourcePitch, int frameWidth, int frameHeight,
@@ -105,7 +105,7 @@ public final class VideoFrameSink {
                     if (!this.alphaPresent && --this.alphaProbeFrames == 0) {
                         // Five frames without a single transparent pixel: this video has no transparency to
                         // drop, so stop rewriting the alpha channel of every frame - at 4K that pass alone
-                        // starves libVLC's output thread, which in turn stalls the decoder and the audio
+                        // starves the decoder's output thread, which in turn stalls the demuxer and the audio
                         // with it.
                         this.forceOpaque = false;
                         LOGGER.debug("Video has no transparency - skipping the alpha pass from now on");
@@ -184,7 +184,7 @@ public final class VideoFrameSink {
     }
 
     /**
-     * How many frames libVLC has delivered. Deliberately independent of the render thread: it only says
+     * How many frames the decoder has delivered. Deliberately independent of the render thread: it only says
      * whether the video output is producing frames at all, which is what "is this playback stalled" has
      * to be based on (the uploaded-frame count made a busy loading screen look like a stalled video).
      */

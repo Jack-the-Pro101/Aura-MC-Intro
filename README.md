@@ -26,105 +26,41 @@ Everything is configurable in-game through **Mod Menu → Config** (Cloth Config
 
 1. **Minecraft 1.21.10 / 1.21.11 / 26.1 / 26.2 / 26.3 + Fabric Loader ≥ 0.19.5** (Fabric API is required).
    Each release jar declares exactly the versions it was built against, so launchers pick the right file.
-2. **libVLC** installed on the system - video decoding is delegated to libVLC through
-   [vlcj](https://github.com/caprica/vlcj). It is auto-detected, but *where* it must be installed differs
-   per platform:
+2. **Nothing else.** The video is decoded by FFmpeg libraries that ship **inside the mod jar** (the
+   prebuilt builds from the [JavaCPP presets](https://github.com/bytedeco/javacpp-presets):
+   `libavformat`, `libavcodec`, `libavutil`, `libswscale`, `libswresample` - trimmed to what VP9
+   playback needs, for Windows/Linux/macOS on x86-64 and ARM64). On first use they are extracted once
+   into `config/titlescreen/javacpp-cache/` and reused from there on every launch. No VLC or FFmpeg
+   installation is required, and sandboxed launchers (Flatpak/Snap) work without exposing anything of
+   the host OS. Bundling every platform makes the mod jar large (~120 MB) - that is the price of "put
+   the jar in the mods folder and it works".
 
-   | Platform | What you need | Why |
-   | --- | --- | --- |
-   | Windows | VLC media player installed | `libvlc.dll` lives in the VLC install directory; the installer records that directory in the registry, which vlcj's `WindowsNativeDiscoveryStrategy` reads. |
-   | macOS | `VLC.app` in `/Applications` | `libvlc.dylib` + plugins are bundled inside the app and vlcj looks there. |
-   | Linux | `vlc` (or `libvlc`) from your distro | Distros place `libvlc.so.5` in `/usr/lib64` (Fedora) or `/usr/lib/x86_64-linux-gnu` (Debian/Ubuntu) with plugins in `<libdir>/vlc/plugins`; vlcj's `LinuxNativeDiscoveryStrategy` probes those standard directories. |
-
-   Linux is not special in *needing* a shared library - all three platforms need libVLC; Linux simply has
-   no single install location convention, which is why sandboxed launchers break it:
-
-   ### Flatpak / Snap launchers on Linux
-
-   A sandboxed launcher (e.g. the **Flatpak PrismLauncher**, `org.prismlauncher.PrismLauncher`) cannot see
-   the host's `/usr/lib64`, so the installed VLC is invisible to the game even though `dnf install vlc`
-   worked. With libvlc present on the host, the error is:
-
-   ```
-   (Titlescreen/Video) libvlc could not be located. Install VLC or set 'libVLC folder' ...
-   ```
-
-   Fix it by exposing the host OS files to the launcher sandbox:
-
-   ```bash
-   # expose the host operating system (so libvlc is visible at /run/host/usr/lib64)
-   flatpak override --user --filesystem=host-os org.prismlauncher.PrismLauncher
-   ```
-
-   That is all: the mod then loads VLC's libraries, VLC's plugins **and the plugins' dependencies**
-   itself (by absolute path, which the dynamic loader reuses when a plugin asks for them by name), so no
-   wrapper script, environment variable or other per-user setup is needed. The log says so:
-
-   ```
-   (Titlescreen/Video) Preloaded 33 libVLC plugin dependencies from /run/host/usr/lib64 (no launcher wrapper needed)
-   ```
-
-   The same applies to Minecraft's own OpenAL device inside the sandbox: the mod restricts OpenAL to
-   `pulse,alsa` from inside the game process (an existing `ALSOFT_DRIVERS` is never overridden).
-
-   > ⚠️ Exposing the host OS is a launcher-wide permission, so it applies to every instance. If you would
-   > rather restrict it, `--filesystem=/usr/lib64:ro` (use `/usr/lib/x86_64-linux-gnu` on Debian/Ubuntu
-   > based hosts) covers VLC's libraries alone; drop-in folders configured via `libVLC folder` work too.
-
-   **Fallback for older setups**: if a sandbox hides the host's VLC plugin dependencies in a way the
-   preload cannot reach (for example a libVLC layout with its own private ffmpeg), the mod logs the exact
-   `LD_LIBRARY_PATH` to set for the *instance* (PrismLauncher: Edit -> Settings -> Environment variables,
-   override global) together with the note that the sandbox's GL directories must stay in front -
-   otherwise the host's GL/driver libraries shadow the sandbox's and Sodium hangs. The launcher's
-   *wrapper command* is the cleanest place for that:
-
-   ```sh
-   #!/bin/sh
-   GL_DIRS=/usr/lib/x86_64-linux-gnu/GL/default/lib:/usr/lib/x86_64-linux-gnu/GL/nvidia-<version>/lib
-   HOST_LIB=/run/host/usr/lib64
-   export LD_LIBRARY_PATH="$GL_DIRS:$HOST_LIB:$HOST_LIB/vlc:$HOST_LIB/samba:$HOST_LIB/pulseaudio${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-   exec "$@"
-   ```
-
-   > ⚠️ Restart the launcher after changing this: a launcher that is already running keeps its old
-   > settings in memory and will ignore the new value.
-   > ⚠️ Do **not** use `flatpak override --env=LD_LIBRARY_PATH=... org.prismlauncher.PrismLauncher`:
-   > that replaces the launcher's own environment, and the launcher (libproxy) then cannot load its
-   > bundled libraries - it will not even start (`dlopen() failed: libopenal.so` /
-   > `libpxbackend-1.0.so: cannot open shared object file`).
-   > The per-instance environment variable setting cannot be relied on either, because PrismLauncher's
-   > strict-JSON `Env` value does not survive a save/load round-trip here.
-
-   **Without the `LD_LIBRARY_PATH` entries**, VLC still loads and its plugins are found, but their
-   dependencies cannot be resolved, which shows up as videos that end instantly with no picture (VLC
-   falls back to its `ps` demuxer). **Without the `pulseaudio` directory** the pulse plugin fails with
-   `libpulsecommon-17.0.so: cannot open shared object file` (the videos play silently, and the log fills
-   with these errors), and **without `ALSOFT_DRIVERS`** Minecraft's own OpenAL device fails to open
-   (`Failed to open OpenAL device`) so the game has no sound at all. The mod logs the exact variable when
-   it detects the `LD_LIBRARY_PATH` condition.
-
-   Note that the `org.videolan.VLC` Flatpak does **not** expose libvlc to other sandboxes, so installing VLC
-   as a Flatpak alone is not enough. Alternatives: install PrismLauncher natively (rpm/deb), or point
-   `libVLC folder` in the config at a directory containing libvlc + plugins (a matching `plugins` or
-   `vlc/plugins` subfolder is picked up automatically via `VLC_PLUGIN_PATH`).
+   The only mod-specific tweak to the environment is one Minecraft itself benefits from: on Linux the
+   mod restricts OpenAL to `pulse,alsa` from inside the game process (an existing `ALSOFT_DRIVERS` is
+   never overridden), so the game's own sound also comes up inside sandboxed launchers.
 
 3. A video file, by default `config/titlescreen/intro.webm` inside your game directory.
    **You don't have to provide one**: the mod ships its video inside the jar and plays that whenever the
    configured path is empty or has no file at it - so it works out of the box, and dropping your own clip at
    that path overrides the bundled one (`useBundledDefaultVideo` in the config turns the fallback off).
-   The bundled clip is unpacked next to the config (`config/titlescreen/bundled/`) because libVLC needs a
-   real file to open.
+   The bundled clip is unpacked next to the config (`config/titlescreen/bundled/`) because the decoder
+   opens files by real path.
 
 ## Recommended video format
 
-For transparency + audio, use **WebM with VP8/VP9 video including the alpha channel and an Opus/Vorbis
-audio track**. Example conversion with FFmpeg (keeping alpha):
+Use **WebM with 8-bit VP9 video and an Opus/Vorbis audio track**:
 
 ```bash
-ffmpeg -i input.mov -c:v libvpx-vp9 -pix_fmt yuva420p -auto-alt-ref 0 -c:a libopus -b:a 128k intro.webm
+ffmpeg -i input.mov -c:v libvpx-vp9 -pix_fmt yuv420p -crf 28 -b:v 0 -deadline good -cpu-used 3 \
+       -row-mt 1 -c:a libopus -b:a 128k intro.webm
 ```
 
-H.264 MP4 files work too, but they cannot carry an alpha channel (they will be fully opaque).
+H.264 MP4 files work too (FFmpeg decodes them the same way), but they cannot carry an alpha channel.
+
+An alpha channel in the source (VP9 profile 1, `-pix_fmt yuva420p`) is preserved all the way to the
+screen, because the mod decodes through FFmpeg directly - the previous libVLC-based releases flattened
+it to opaque in libVLC's conversion chain. Planar alpha costs extra conversion time per frame, so for an
+ordinary opaque intro keep `yuv420p`.
 
 ### Single baked video (loading screen + intro in one file)
 
@@ -142,15 +78,14 @@ transparency tricks. All `timing` values stay relative to the first frame visibl
 and the loading scene keeps its own look via `loadingBackground.fadeInMs` / `opacity` / `fit`.
 
 Because the whole thing is opaque, nothing here depends on alpha support: it is a single ordinary
-video (VP8/VP9 WebM, H.264 MP4, whatever VLC can decode).
+video (VP8/VP9 WebM, H.264 MP4, whatever FFmpeg can decode).
 
 
-* **Resolution**: frames are kept at the video's native size and handed to libVLC with our own buffer
-  format, so libVLC's scaler (which crashed natively more than once) is never involved. The cost per frame
-  is one copy into the texture plus the GPU upload - the alpha handling for the opaque scenes happens on
-  libVLC's own thread. If a 4K clip is too much for the machine anyway, `videoMaxFps` /
-  `loadingBackground.maxFps` bound how often a frame is uploaded, and `hardwareDecoding` keeps the decode
-  on the GPU.
+* **Resolution**: frames are decoded at the video's native size and converted to RGBA by FFmpeg's own
+  scaler (`swscale`) on the decode threads, which use every core through VP9 frame threading. The cost
+  per displayed frame is one copy into the texture plus the GPU upload - the alpha handling for the
+  opaque scenes happens on the decode thread. If a 4K clip is too much for the machine anyway,
+  `videoMaxFps` / `loadingBackground.maxFps` bound how often a frame is uploaded.
 * **Audio**: the sound comes from the video itself, so the file has to contain an audio track
   (`ffprobe intro.webm` shows the streams). The mod logs which files have no audio track, and each
   video has its own **volume** option - the loading background defaults to `0`, so raise it (e.g. to
@@ -196,7 +131,7 @@ The config lives in `config/titlescreen.json` and is editable in-game via the Cl
 | Loading background (`loadingBackground`) | the moment the loading screen appears and the background video starts (`fadeInMs`, `maxFps`, `waitForVideoToFinish`, `maxWaitForVideoMs`) |
 | Intro video (`timing`) | the **first frame that is actually on screen** of the intro video (`videoStartDelayMs`, `videoFadeInMs`, `progressBarFade*`, `overlayUnloadAtMs`, `buttonsFadeInAtMs`, `buttonsFadeInDurationMs`, `videoFadeOutMs`, `loop*`) |
 
-The intro timeline deliberately starts with the first displayed frame rather than when libVLC is asked
+The intro timeline deliberately starts with the first displayed frame rather than when the decoder is asked
 to start: starting a video takes a moment, and using the request time shifted every timing by that
 amount (most visibly the button fade-in). If the video never produces a frame, the provisional timeline
 from the anchor is used after a few seconds so the loading screen still clears.
@@ -217,12 +152,10 @@ from the anchor is used after a few seconds so the loading screen still clears.
 | `videoPath` | `config/titlescreen/intro.webm` | Video file, relative to the game directory. |
 | `videoVolume` | `100` | Audio volume, 0-100. |
 | `audioDelayMs` | `0` | Shifts a baked video's sound relative to its picture in milliseconds. Positive plays the sound later. Only used when `audioInSamePlayer` is off - with one player for both streams they share a clock and need no delay. Tune by ear; a faster machine needs less, or a negative value. |
-| `audioInSamePlayer` | `true` | Play the sound inside the video player: one clock, so no drift and no delay needed, and libVLC keeps the sound on time by dropping late video frames. Off = a separate audio-only player, which a slow video pipeline cannot starve, but then `audioDelayMs` is what lines the two clocks up. |
+| `audioInSamePlayer` | `true` | Play the sound inside the video player: one clock, so no drift and no delay needed, and the decoder keeps the sound on time by dropping late video frames. Off = a separate audio-only player, which a slow video pipeline cannot starve, but then `audioDelayMs` is what lines the two clocks up. |
 | `videoOpacity` | `100` | Extra opacity multiplier on top of the video's alpha. |
 | `videoFit` | `COVER` | `COVER` (crop), `CONTAIN` (letterbox) or `STRETCH`. |
 | `videoMaxFps` | `60` | Upper bound for GPU texture uploads per second, `0` = unlimited. |
-| `hardwareDecoding` | `true` | Decode on the GPU. Leave on: software decoding of 4K cannot keep up (the video stutters and ends after a handful of frames). libVLC falls back to software itself if the driver cannot handle the stream. |
-| `libVlcPath` | `""` | Optional folder containing libvlc; empty = auto-detect. |
 
 ### Timing (relative to the intro video, measured from its first displayed frame)
 | Option | Default | Description |
@@ -282,9 +215,7 @@ A source that is too heavy for the machine still costs frames, and the cheapest 
    ffmpeg -i intro.webm -c:v libvpx-vp9 -pix_fmt yuv420p -crf 28 -b:v 0 -deadline good -cpu-used 3 \
           -row-mt 1 -c:a copy -y intro_8bit.webm
    ```
-2. **`video.hardwareDecoding: true`** (the default) keeps the decode itself off the CPU where the driver
-   supports the codec.
-3. A lower `videoMaxFps` / `loadingBackground.maxFps` does *not* help here - the cost is per decoded frame,
+2. A lower `videoMaxFps` / `loadingBackground.maxFps` does *not* help here - the cost is per decoded frame,
    not per upload.
 
 The picture and the sound are separate players with their own clocks whenever `audioInSamePlayer` is off, and
@@ -300,20 +231,18 @@ positions, scene flags). It exists so that a stalled scene is visible in the log
 other trace is otherwise impossible to tell apart from a log that simply ended.
 
 Note that the sound can start a hair after the picture, but no longer by a noticeable margin: the audio
-player's preload is silenced with a **startup volume** (`--volume=0`) instead of by switching its audio track
-off. Switching the track off stops libVLC from ever creating its audio output, and creating that output when
-the loading scene begins costs about a second of silence *and* the same second of delay - libVLC then plays
-the samples it queued from the start, so the sound runs behind the picture. A player that starts silently at
-volume 0 has a live audio output from the first samples: resuming it only means turning the volume up.
+output is opened **before playback** - during the silent preload, at volume 0 - instead of when the loading
+scene begins. An output that already exists only has to be fed; resuming it only means turning the volume
+up. Opening it late costs about a second of silence *and* the same second of delay, which is what used to
+push the sound behind the picture.
 
 ### Video never shows up, or the game seems frozen
 
-* **The client thread never calls into libVLC.** Native calls can block indefinitely when a player is
-  in a bad state - two real freezes were traced to this (a thread dump showed the render thread stuck in
-  `libvlc_media_player_stop()`). Player creation/teardown now happens on dedicated threads (teardown is
-  asynchronous, so stopping a stalled player can never freeze the game), progress tracking uses uploaded
-  frame counters only, and the media length comes from libVLC's `lengthChanged` event.
-* **Stalled playback is detected.** libVLC occasionally stops delivering frames (the clip just freezes
+* **The client thread never calls into the decoder.** FFmpeg calls happen on the decode and audio threads
+  only; the client thread reads cheap cached values (frame counters, cached positions, container length).
+  Player creation happens on background threads, teardown joins those threads with a timeout - and if one
+  refuses to stop, its context is leaked rather than ever freezing the game.
+* **Stalled playback is detected.** A decoder occasionally stops delivering frames (the clip just freezes
   while its audio keeps playing, or it stops right at the end and never fires its end event). Both scenes
   track uploaded frames themselves:
   * the loading screen stops waiting for the background video instead of sitting there until
@@ -322,8 +251,8 @@ volume 0 has a live audio output from the first samples: resuming it only means 
 * **A missing video is recovered.** If the intro player starts but never delivers a frame it is restarted
   (up to 3 attempts, `The video intro produced no frames … restarting it`), and a failed start is retried
   instead of disabling the video for the rest of the session.
-* Native libVLC start-up and teardown are serialised, so the hand-over from the loading screen (frozen
-  background player) to the intro video cannot interleave inside JNA's marshalling.
+* Start-up and teardown of the players are serialised, so the hand-over from the loading screen (frozen
+  background player) to the intro video cannot interleave inside the FFmpeg contexts.
 * With `debugLogging: true`, a watchdog notices a frozen client (no tick for 10 s) and writes a
   **thread dump** into the log once (`The client has not ticked for … ms - writing a thread dump`). If
   the game ever hangs, that dump identifies the stuck thread - please keep it when reporting.
@@ -344,30 +273,29 @@ taking over.
 
 ## How it works (performance notes)
 
-- libVLC decodes on its own native threads; the game thread copies the newest decoded frame straight into
+- FFmpeg decodes on its own native threads (VP9 frame-threaded, using every core); the game thread copies the newest decoded frame straight into
   the texture's pixels (one copy, one upload per displayed frame, throttled by the max-FPS options) and
   draws it through the vanilla GUI render pipeline (the render-state system on 26.x, immediate
   `GuiGraphics` drawing on 1.21.x).
-- Frames are kept at the video's native size and handed to libVLC with our own buffer format: no scaler
-  inside libVLC (that crashed natively more than once) and no resampling pass in Java.
+- Frames are kept at the video's native size and converted to RGBA by FFmpeg's `swscale` on the decode
+  threads; no extra resampling pass runs in Java.
 - The video is drawn with a **linear, clamp-to-edge** sampler instead of the nearest/repeat one Minecraft
   creates dynamic textures with, so scaling the clip to the screen is filtered rather than point-sampled
   (that point sampling is what made the picture look blocky and jagged next to a video player's scaler).
   The 26.x builds use their own sampler for this; on 1.21.x the GUI pipeline picks the sampler, so the
   picture is drawn the way vanilla blits any texture there.
-- Everything that can be done off the render thread is: an opaque scene's alpha is dropped while libVLC's
+- Everything that can be done off the render thread is: an opaque scene's alpha is dropped while the
   thread writes the frame, which is where the spare time is. Doing it per pixel on the render thread cost
   more than the rest of the frame combined at 4K, and that was what made the loading video stutter.
-- The loading scene's video is **preloaded during early startup** (libVLC loaded before the window exists,
+- The loading scene's video is **preloaded during early startup** (FFmpeg loaded before the window exists,
   first frame decoded and then paused), so it is already on screen the moment the loading screen appears.
 - With a baked single video there is exactly one *video* player and one texture for both scenes, so the
   hand-over allocates, opens and decodes nothing - and by default that same player carries the sound, which
-  means picture and sound share one clock and cannot drift. (Two *video* players on the same 4K file is what
-  crashed natively, so the picture always stays in one player.)
+  means picture and sound share one clock and cannot drift, and the picture always stays in one player.
 - Frames produced while the render thread is busy are dropped instead of queued.
-- Nothing is started on the render thread: player creation, teardown and all libVLC control calls happen on
-  background threads (see `VlcVideoPlayer`).
-- If anything goes wrong (missing file, missing libVLC, decode error) the mod disables itself and the
+- Nothing is started on the render thread: player creation, teardown and every decoder call happen on
+  background threads (see `FfmpegVideoPlayer`).
+- If anything goes wrong (missing file, FFmpeg not loadable, decode error) the mod disables itself and the
   vanilla loading/title screen is used unchanged.
 
 ## Building
@@ -390,11 +318,11 @@ API differences are handled with Stonecutter comment conditions (`//? if ...`) a
 
 ## Licensing note
 
-The mod bundles [vlcj](https://github.com/caprica/vlcj) **and vlcj's `vlcj-natives` support artifact**
-plus JNA via jar-in-jar so that the video feature works out of the box. vlcj-natives is required at
-runtime (it contains `uk.co.caprica.vlcj.binding.support.runtime.RuntimeUtil`, used by libVLC's native
-discovery) - without it the video feature fails in production builds with a `NoClassDefFoundError`.
-**vlcj is GPL-3.0 licensed**, which means a build produced with `bundle_video_libraries=true` (the
-default) is effectively GPL-3.0 as a whole. If you need to ship the mod under a different license, set
-`bundle_video_libraries=false` in `gradle.properties`; users then have to provide vlcj themselves, or
-run without video.
+The mod bundles [JavaCPP](https://github.com/bytedeco/javacpp) and its FFmpeg preset plus JNA via
+jar-in-jar so that the video feature works out of the box. The nested FFmpeg libraries are the LGPL-2.1
+builds from the JavaCPP presets, trimmed to the libraries the player actually uses (`avutil`, `avcodec`,
+`avformat`, `swresample`, `swscale` - `avdevice`, `avfilter` and the command line programs are stripped
+by the build). FFmpeg is licensed under LGPL-2.1-or-later (source and license: https://ffmpeg.org),
+JNA is dual-licensed Apache-2.0/LGPL-2.1. Building with `bundle_video_libraries=false` in
+`gradle.properties` produces a jar without them, where the video then needs those libraries on the
+classpath some other way.

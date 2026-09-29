@@ -13,7 +13,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 
 /**
- * Turns a configured video path into a file libVLC can play.
+ * Turns a configured video path into a video file the backend can play.
  *
  * <p>The mod ships with its video, so the video intro works with no setup at all. A configured path only
  * takes over when a file is actually there, which is what makes "drop your own clip at that path" the way to
@@ -27,7 +27,7 @@ public final class VideoAssets {
     private static final String BUNDLED_LOADING_BACKGROUND = "/assets/titlescreen/video/mojang_studios.webm";
 
     /**
-     * Where a bundled clip is unpacked for libVLC, which needs a real path - it cannot open something inside
+     * Where a bundled clip is unpacked for the decoder, which opens files by real path - not something inside
      * a jar. Kept in the config directory so it is obvious what the file is, and reused between launches.
      */
     private static final String CACHE_DIRECTORY = "titlescreen/bundled";

@@ -35,8 +35,8 @@ import java.util.Optional;
  * no seek, no stutter.</p>
  *
  * <p>Everything here runs on the client/render thread (client tick events, mixin callbacks during
- * rendering) and never calls libVLC: decoding happens on libVLC's threads, control calls on
- * {@link VlcVideoPlayer}'s command thread. Per frame this class copies one decoded frame into a texture
+ * rendering) and never calls into the decoder: decoding happens on the backend's own threads, and
+ * control values are cheap volatile reads/writes. Per frame this class copies one decoded frame into a texture
  * and draws it once per scene, and all of its diagnostic reporting sits behind the {@code debugLogging}
  * config option.</p>
  */
@@ -48,8 +48,8 @@ public final class TitlescreenVideoManager {
     private static final int MAX_SESSION_START_ATTEMPTS = 3;
     private static final TitlescreenVideoManager INSTANCE = new TitlescreenVideoManager();
 
-    private VideoPlayer player = new VlcVideoPlayer();
-    private VideoPlayer backgroundPlayer = new VlcVideoPlayer();
+    private VideoPlayer player = new FfmpegVideoPlayer();
+    private VideoPlayer backgroundPlayer = new FfmpegVideoPlayer();
 
     /**
      * The sound of a baked video, played by a player of its own.
@@ -59,7 +59,7 @@ public final class TitlescreenVideoManager {
      * the sound cutting in and out. Separate players have separate threads: the picture may drop frames, the
      * sound will not.</p>
      */
-    private VideoPlayer audioPlayer = VlcVideoPlayer.audioOnly();
+    private VideoPlayer audioPlayer = FfmpegVideoPlayer.audioOnly();
 
     private final VideoTextureLayer introTexture =
             new VideoTextureLayer("titlescreen", "video_frame", "Titlescreen intro video");
@@ -90,8 +90,6 @@ public final class TitlescreenVideoManager {
     private long anchorSetMs;
     /** Updated by every client tick; the watchdog uses it to notice a frozen client. */
     private volatile long lastTickMs;
-    /** Set once a player failed to deliver frames with hardware decoding - later players use software. */
-    private boolean forceSoftwareDecoding;
 
     private boolean watchdogStarted;
     private boolean stallDumpReported;
@@ -186,7 +184,7 @@ public final class TitlescreenVideoManager {
         }
 
         // Preload the loading background video as soon as the client starts so its first frame is ready
-        // before the loading screen appears (libVLC start-up would otherwise show the vanilla loading
+        // before the loading screen appears (loading the decoder would otherwise show the vanilla loading
         // screen first). The preload is silent - see preloadLoadingBackground.
         preloadLoadingBackgroundOnce();
 
@@ -202,7 +200,7 @@ public final class TitlescreenVideoManager {
         }
 
         // Pause the preloaded background video on its first frame. This is done here, on the client
-        // thread, because libVLC must not be called from inside its own video callbacks.
+        // thread, because it must not be changed from inside the decoder's own threads.
         if (this.backgroundPlayer.consumePauseAfterFirstFrame()) {
             this.backgroundPlayer.setPaused(true);
             if (cfg.general.debugLogging) {
@@ -242,7 +240,7 @@ public final class TitlescreenVideoManager {
         }
 
         // If the intro player started but never delivers a frame, restart it: a title screen with the
-        // video missing is the usual symptom of a failed libVLC start, and it used to stay that way for
+        // video missing is the usual symptom of a failed decoder start, and it used to stay that way for
         // the whole session.
         if (this.sessionActive && this.introFramesUploaded == 0L && !this.player.isFinished()
                 && !this.timelineLocked && Util.getMillis() - this.introStartMs > 2500L
@@ -371,8 +369,8 @@ public final class TitlescreenVideoManager {
             // Its sound comes either from that player itself (one clock, no drift, but the sound shares the
             // video's demux) or from the separate audio-only player - see the audioPlayer field.
             this.backgroundPlayer = cfg.video.audioInSamePlayer
-                    ? new VlcVideoPlayer()
-                    : VlcVideoPlayer.silentVideo();
+                    ? new FfmpegVideoPlayer()
+                    : FfmpegVideoPlayer.silentVideo();
             this.player = this.backgroundPlayer;
         }
         preloadLoadingBackground();
@@ -432,20 +430,19 @@ public final class TitlescreenVideoManager {
         if (path == null) {
             return;
         }
-        // The loading scene is a background: dropping its alpha happens on libVLC's thread, which
+        // The loading scene is a background: dropping its alpha happens on the decode thread, which
         // is far cheaper than masking every 4K frame on the render thread.
         this.backgroundPlayer.sink().setForceOpaque(true);
         this.backgroundPreloadRequested = true;
         Thread thread = new Thread(() -> {
             this.backgroundPlayer.setDebugLogging(cfg.general.debugLogging);
-            this.backgroundPlayer.setHardwareDecoding(cfg.video.hardwareDecoding && !this.forceSoftwareDecoding);
             // Volume 0: the preload decodes the first frame while the game is still starting up, and
             // playing the audio there would be heard long before anything is on screen.
-            boolean ok = this.backgroundPlayer.preload(path, 0, cfg.video.libVlcPath);
+            boolean ok = this.backgroundPlayer.preload(path, 0);
             if (usesSeparateAudioPlayer(cfg)) {
                 // Silent again (volume 0) and paused on its first samples, so it cannot run ahead of the
                 // loading scene that will play it either.
-                this.audioPlayer.preload(path, 0, cfg.video.libVlcPath);
+                this.audioPlayer.preload(path, 0);
             }
             synchronized (this) {
                 this.backgroundPreloadRequested = false;
@@ -466,7 +463,7 @@ public final class TitlescreenVideoManager {
         }
         if (this.backgroundPreloadRequested) {
             // The preload is still starting up - wait for it instead of starting a second session on
-            // the same player, which would race with libVLC's native discovery. The next frame resumes
+            // the same player, which would race with the start-up still in progress. The next frame resumes
             // from the preloaded first frame (isPreloaded() below).
             return;
         }
@@ -486,7 +483,7 @@ public final class TitlescreenVideoManager {
             long preloadPositionMs = this.backgroundPlayer.cachedTimeMs();
             boolean restartFromStart = preloadPositionMs > 300L;
             if (restartFromStart) {
-                // Only when the silent preload ran noticeably ahead (it starts playing as soon as libVLC
+                // Only when the silent preload ran noticeably ahead (it starts playing as soon as the decoder
                 // has opened the file). Seeking flushes the decoder and briefly shows a black frame, so
                 // doing it unconditionally caused the visible flash between the preload frame and the
                 // real playback.
@@ -531,10 +528,9 @@ public final class TitlescreenVideoManager {
         long generation = ++this.backgroundGeneration;
         Thread thread = new Thread(() -> {
             this.backgroundPlayer.setDebugLogging(cfg.general.debugLogging);
-            this.backgroundPlayer.setHardwareDecoding(cfg.video.hardwareDecoding && !this.forceSoftwareDecoding);
-            boolean ok = this.backgroundPlayer.start(path, loadingVolume(cfg), cfg.video.libVlcPath);
+            boolean ok = this.backgroundPlayer.start(path, loadingVolume(cfg));
             if (ok && usesSeparateAudioPlayer(cfg)) {
-                this.audioPlayer.start(path, loadingVolume(cfg), cfg.video.libVlcPath);
+                this.audioPlayer.start(path, loadingVolume(cfg));
             }
             if (this.backgroundGeneration != generation) {
                 this.backgroundPlayer.close();
@@ -782,7 +778,7 @@ public final class TitlescreenVideoManager {
 
 
 
-    /** Starts libVLC on a background thread so the first real frame never blocks loading. */
+    /** Starts the decoder on a background thread so the first real frame never blocks loading. */
     private boolean beginSession(TitlescreenConfig cfg) {
         Path path = VideoAssets.resolveIntro(cfg);
         if (path == null) {
@@ -799,12 +795,11 @@ public final class TitlescreenVideoManager {
         long generation = ++this.sessionGeneration;
         Thread thread = new Thread(() -> {
             this.player.setDebugLogging(cfg.general.debugLogging);
-            this.player.setHardwareDecoding(cfg.video.hardwareDecoding && !this.forceSoftwareDecoding);
-            boolean ok = this.player.start(path, cfg.video.videoVolume, cfg.video.libVlcPath);
+            boolean ok = this.player.start(path, cfg.video.videoVolume);
             if (usesSeparateAudioPlayer(cfg)) {
                 // Reached when a baked video is retried (normally its sound is already playing): restart it
                 // with the video so both stay together.
-                this.audioPlayer.start(path, cfg.video.videoVolume, cfg.video.libVlcPath);
+                this.audioPlayer.start(path, cfg.video.videoVolume);
                 this.audioPlayer.setAudioDelayMs(cfg.video.audioDelayMs);
             }
             if (ok && startAtMs > 0L) {
@@ -816,7 +811,7 @@ public final class TitlescreenVideoManager {
                 }
             }
             if (this.sessionGeneration != generation) {
-                // The session was torn down while libVLC was still starting up.
+                // The session was torn down while the decoder was still starting up.
                 this.player.close();
                 return;
             }
@@ -901,12 +896,6 @@ public final class TitlescreenVideoManager {
         stopSession(minecraft);
         this.sessionStartFailures++;
         this.lastSessionFailureMs = Util.getMillis();
-        // A player that produced no frames is very likely a hardware-decoding failure: retry this one in
-        // software, which always works.
-        if (cfg.video.hardwareDecoding && !this.forceSoftwareDecoding) {
-            this.forceSoftwareDecoding = true;
-            LOGGER.warn("Retrying the video intro with software decoding");
-        }
         // stopSession() clears the anchor; the video is retried on a fresh timeline, but the overlay
         // bookkeeping has to survive so the loading screen still clears at the configured timestamp.
         this.anchorSet = anchored != null;
@@ -1052,7 +1041,7 @@ public final class TitlescreenVideoManager {
     }
 
     /**
-     * Reports where the picture and the sound are, as libVLC itself sees them (debug logging only).
+     * Reports where the picture and the sound are, as the backend reports them (debug logging only).
      *
      * <p>The two are separate players, so their own positions are the honest way to see how far apart they
      * are. The sound lagging comes from the audio output's own start-up latency, which differs from launch
@@ -1121,7 +1110,7 @@ public final class TitlescreenVideoManager {
     /**
      * Watches both players for a playback that stops advancing, and gives up on it.
      *
-     * <p>libVLC occasionally stops reporting progress for a media it is playing (never firing its end
+     * <p>A decoder occasionally stops reporting progress for a media it is playing (never firing its end
      * event) - the loading screen then waits for the background video forever and the intro never
      * starts, which looks exactly like "the second video did not play". A few hundred milliseconds of
      * progress tracking is enough to notice and move on.</p>
@@ -1170,7 +1159,7 @@ public final class TitlescreenVideoManager {
                     LOGGER.warn("The loading video only produced {} frames per second ({} frames in {} ms, {} "
                                     + "drawn) - this machine cannot decode it fast enough, and that is also "
                                     + "what starves its audio. Use a lighter source video (8-bit decodes far "
-                                    + "faster than 10-bit 4:2:2) and make sure video.hardwareDecoding is on.",
+                                    + "faster than 10-bit 4:2:2) and use a smaller source video.",
                             fps, frames, elapsedMs, this.backgroundFramesUploaded);
                 } else if (cfg.general.debugLogging) {
                     LOGGER.info("Loading video is playing at {} fps ({} frames produced, {} drawn in {} ms)",
@@ -1206,7 +1195,7 @@ public final class TitlescreenVideoManager {
                 }
             }
 
-            // What the player actually sees is the uploaded texture, not the frames libVLC produces: if
+            // What the player actually sees is the uploaded texture, not the frames the decoder produces: if
             // the uploads stop while the vout keeps producing, the picture freezes silently and nothing
             // would ever end the intro. Watch the uploads too and end the scene on a stall there.
             if (this.introFramesUploaded != this.lastIntroUploadCount) {
@@ -1220,7 +1209,7 @@ public final class TitlescreenVideoManager {
                         now - this.lastIntroUploadMs, produced, this.introFramesUploaded);
             }
 
-            // A low frame rate is the fingerprint of a video libVLC cannot decode fast enough (a 4K source
+            // A low frame rate is the fingerprint of a video the CPU cannot decode fast enough (a 4K source
             // with software decoding). It does not trip the stall watchdogs - frames still trickle in - so
             // it used to show up only as "the video freezes and the intro never ends".
             if (!this.introFrameRateReported) {
@@ -1234,9 +1223,8 @@ public final class TitlescreenVideoManager {
                     long fps = frames * 1000L / elapsedMs;
                     if (fps < 15L) {
                         LOGGER.warn("The video intro only produced {} frames per second ({} frames in {} ms, "
-                                        + "{} drawn) - libVLC cannot decode it fast enough, so it will look "
-                                        + "frozen and never reach its end. Turn video.hardwareDecoding on, or "
-                                        + "use a smaller source video.",
+                                        + "{} drawn) - the decoder cannot keep up, so it will look "
+                                        + "frozen and never reach its end. Use a smaller source video.",
                                 fps, frames, elapsedMs, this.introFramesUploaded);
                     } else if (cfg.general.debugLogging) {
                         LOGGER.info("Video intro is playing at {} fps ({} frames produced, {} drawn in {} ms, "
@@ -1248,7 +1236,7 @@ public final class TitlescreenVideoManager {
         }
     }
 
-    /** True once the intro video reached its end (by libVLC's event or by the watchdog). */
+    /** True once the intro video reached its end (by the backend's end flag or by the watchdog). */
     private boolean introEnded() {
         return this.player.isFinished() || this.introEndedEarly || mediaReachedEnd();
     }
@@ -1256,10 +1244,10 @@ public final class TitlescreenVideoManager {
     /**
      * Whether the media's playhead has reached the end of the file.
      *
-     * <p>libVLC does not reliably deliver its "finished" event for these players, and the stall watchdogs
+     * <p>The backend's "finished" flag is not something to wait for forever: the stall watchdogs
      * stay quiet as long as frames still trickle in - so a video that plays to its end could sit there
-     * forever with the title screen never taking over. The length and the playhead both arrive through
-     * libVLC's own events, so they are safe to read here, and the last half second counts as the end.</p>
+     * forever with the title screen never taking over. The length and the playhead are cached values,
+     * so they are safe to read here, and the last half second counts as the end.</p>
      */
     private boolean mediaReachedEnd() {
         long length = this.player.lengthMs();
@@ -1564,7 +1552,7 @@ public final class TitlescreenVideoManager {
      * Uploads the newest frame to the intro layer and, on the first one, fixes the intro timeline.
      *
      * <p>The config timings are relative to the video, so the timeline only starts once the video's first
-     * frame is on screen - not when libVLC was asked to start it (that takes a moment, which used to
+     * frame is on screen - not when the decoder was asked to start it (that takes a moment, which used to
      * shift every timing).</p>
      *
      * @return {@code true} when a frame reached the texture

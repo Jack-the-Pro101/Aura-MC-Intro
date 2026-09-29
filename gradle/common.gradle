@@ -74,6 +74,77 @@ repositories {
     }
 }
 
+// The FFmpeg platforms bundled with the mod (prebuilt libraries from the JavaCPP presets).
+def ffmpegPlatforms = ['windows-x86_64', 'linux-x86_64', 'linux-arm64', 'macosx-x86_64', 'macosx-arm64']
+
+// The player only uses avutil/avcodec/avformat/swresample/swscale - avdevice, avfilter and the
+// ffmpeg/ffprobe command line programs (roughly 40% of every natives jar) are dead weight for
+// VP9-in-WebM playback. Loom's jar-in-jar mechanism requires module components, so each trimmed
+// jar is written into a build-local Maven repository (as net.bluegaria.ffmpeg:ffmpeg-natives)
+// and nested from there like any regular dependency.
+def ffmpegMaven = project.layout.buildDirectory.dir('ffmpeg-maven')
+
+if (project.bundle_video_libraries.toBoolean()) {
+    ffmpegPlatforms.each { platform ->
+        tasks.register("trimFfmpegNatives${platform.replaceAll(/[^a-zA-Z0-9]/, '_')}") {
+            description = "Trims the bundled FFmpeg natives (${platform}) to the libraries the player loads."
+            def source = configurations.detachedConfiguration(
+                    dependencies.create("org.bytedeco:ffmpeg:${project.ffmpeg_version}:${platform}") {
+                        transitive = false
+                    })
+            def outFile = ffmpegMaven
+                    // Maven repository layout: group (net.bluegaria.ffmpeg) with dots as slashes.
+                    .map { it.dir("net/bluegaria/ffmpeg/ffmpeg-natives/${project.ffmpeg_version}") }
+                    .map { it.file("ffmpeg-natives-${project.ffmpeg_version}-${platform}.jar") }
+            inputs.property('platform', platform)
+            inputs.files(source)
+            outputs.file(outFile)
+            doLast {
+                def inputJar = source.files.find { it.name.endsWith("-${platform}.jar") }
+                def target = outFile.get().asFile
+                target.parentFile.mkdirs()
+                new java.util.zip.ZipFile(inputJar).withCloseable { zip ->
+                    new java.util.zip.ZipOutputStream(new java.io.FileOutputStream(target)).withCloseable { out ->
+                        zip.entries().each { entry ->
+                            def name = entry.name.tokenize('/')[-1]
+                            def dropped = name.contains('avdevice') || name.contains('avfilter')
+                                    || name.contains('postproc') || name.startsWith('jnijavacpp')
+                                    || name in ['ffmpeg', 'ffprobe', 'ffmpeg.exe', 'ffprobe.exe']
+                            if (dropped) {
+                                return
+                            }
+                            out.putNextEntry(new java.util.zip.ZipEntry(entry.name))
+                            if (!entry.directory) {
+                                zip.getInputStream(entry).withCloseable { it.transferTo(out) }
+                            }
+                            out.closeEntry()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    repositories {
+        maven {
+            name = 'FfmpegNatives'
+            url = ffmpegMaven
+            // The repository only holds the trimmed jars, no POMs.
+            metadataSources { artifact() }
+            content {
+                includeGroup 'net.bluegaria.ffmpeg'
+            }
+        }
+    }
+
+    // The nested jars are resolved when loom processes the mod jar - by then the trimmed
+    // jars must exist.
+    tasks.matching { it.name == 'processIncludeJars' }.configureEach {
+        dependsOn tasks.matching { it.name.startsWith('trimFfmpegNatives') }
+    }
+}
+
+
 dependencies {
     // To change the versions see the versions/<mc>/gradle.properties file
     minecraft "com.mojang:minecraft:${sc.current.version}"
@@ -113,16 +184,29 @@ dependencies {
     // MixinExtras is shipped by the loader at runtime; this is only for compile-time annotations.
     compileOnly "io.github.llamalad7:mixinextras-fabric:0.5.5"
 
-    // Video playback. vlcj is a JNA binding for libVLC (a system installation of VLC is required).
-    // vlcj-natives holds vlcj's native-discovery support classes and must be bundled as well,
-    // otherwise class loading fails in production (dev classpaths resolve it transitively).
-    implementation "uk.co.caprica:vlcj:${project.vlcj_version}"
-    implementation "uk.co.caprica:vlcj-natives:${project.vlcj_natives_version}"
+    // Video playback: FFmpeg is bundled with the mod (JavaCPP presets), so nothing has to be
+    // installed on the system. libavformat demuxes the WebM container, libavcodec decodes
+    // (VP9 video, Opus/Vorbis audio), libswscale converts pictures to RGBA and libswresample
+    // resamples the sound for audio output.
+    implementation "org.bytedeco:javacpp:${project.javacpp_version}"
+    implementation "org.bytedeco:ffmpeg:${project.ffmpeg_version}"
+    // In the dev environment the natives for the running platform come from these jars as well;
+    // the built jar nests only trimmed copies (see the trimFfmpegNatives tasks above).
+    ffmpegPlatforms.each { platform ->
+        implementation "org.bytedeco:ffmpeg:${project.ffmpeg_version}:${platform}"
+    }
+
     if (project.bundle_video_libraries.toBoolean()) {
-        include "uk.co.caprica:vlcj:${project.vlcj_version}"
-        include "uk.co.caprica:vlcj-natives:${project.vlcj_natives_version}"
+        // The Java binding layer (javacpp) plus the FFmpeg API classes.
+        include "org.bytedeco:javacpp:${project.javacpp_version}"
+        include "org.bytedeco:ffmpeg:${project.ffmpeg_version}"
+        // JNA remains for the libc setenv() call in TitlescreenClient (OpenAL inside sandboxes).
         include "net.java.dev.jna:jna:${project.jna_version}"
-        include "net.java.dev.jna:jna-platform:${project.jna_version}"
+        // The prebuilt libraries, trimmed (see the trimFfmpegNatives tasks above) and nested
+        // from the build-local repository.
+        ffmpegPlatforms.each { platform ->
+            include "net.bluegaria.ffmpeg:ffmpeg-natives:${project.ffmpeg_version}:${platform}"
+        }
     }
 }
 

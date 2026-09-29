@@ -30,10 +30,6 @@
   "text.autoconfig.titlescreen.option.video.videoFit.@Tooltip": "How the video is fitted to the screen: COVER crops, CONTAIN letterboxes, STRETCH fills.",
   "text.autoconfig.titlescreen.option.video.videoMaxFps": "Max upload FPS",
   "text.autoconfig.titlescreen.option.video.videoMaxFps.@Tooltip": "Upper bound for texture uploads per second. 0 = unlimited.",
-  "text.autoconfig.titlescreen.option.video.hardwareDecoding": "Hardware decoding",
-  "text.autoconfig.titlescreen.option.video.hardwareDecoding.@Tooltip": "Decode video on the GPU. Off by default: hardware decoding is unreliable in sandboxed launchers (it drops the VP9 alpha plane and a second concurrent video often shows no frames at all). Enable it only if software decoding cannot keep up with a large opaque video.",
-  "text.autoconfig.titlescreen.option.video.libVlcPath": "libVLC folder",
-  "text.autoconfig.titlescreen.option.video.libVlcPath.@Tooltip": "Optional folder containing libvlc. Leave empty to auto-detect an installed VLC.",
 
   "text.autoconfig.titlescreen.option.timing": "Timing (relative to video start)",
   "text.autoconfig.titlescreen.option.timing.videoStartDelayMs": "Video start delay (ms)",
