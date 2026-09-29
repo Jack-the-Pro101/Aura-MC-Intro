@@ -59,7 +59,9 @@ jobs:
         if: matrix.platform == 'linux-x86_64'
         run: |
           git clone --depth 1 -b n12.2.72.0 https://github.com/FFmpeg/nv-codec-headers.git /tmp/nv-codec-headers
-          make -C /tmp/nv-codec-headers install PREFIX=/usr
+          # The runner user cannot write to /usr, so the install needs sudo
+          # (the tags/* checkout warning from --depth 1 is harmless).
+          sudo make -C /tmp/nv-codec-headers install PREFIX=/usr
 
       - name: Cache FFmpeg sources
         uses: actions/cache@v4
