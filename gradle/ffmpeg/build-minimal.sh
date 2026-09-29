@@ -31,7 +31,11 @@ case "$PLATFORM" in
     # Needs libva-dev and the nv-codec-headers package installed; set FFMPEG_NO_HWACCEL=1
     # for a software-only build without those dependencies.
     if [ "${FFMPEG_NO_HWACCEL:-0}" != 1 ]; then
-      HWACCEL=(--enable-vaapi --enable-nvdec --enable-cuda --enable-hwaccels)
+      # --enable-ffnvcodec is required even though it looks redundant:
+      # configure's --disable-autodetect turns the ffnvcodec probe off, which
+      # leaves --enable-nvdec/--enable-cuda unsatisfiable ("cuda requested,
+      # but not all dependencies are satisfied: ffnvcodec").
+      HWACCEL=(--enable-vaapi --enable-ffnvcodec --enable-nvdec --enable-cuda --enable-hwaccels)
     else
       HWACCEL=()
     fi

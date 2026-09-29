@@ -62,6 +62,9 @@ jobs:
           # The runner user cannot write to /usr, so the install needs sudo
           # (the tags/* checkout warning from --depth 1 is harmless).
           sudo make -C /tmp/nv-codec-headers install PREFIX=/usr
+          # Fail here, not inside FFmpeg's configure later, if the headers are
+          # somehow not visible to pkg-config.
+          pkg-config --modversion ffnvcodec
 
       - name: Cache FFmpeg sources
         uses: actions/cache@v4
