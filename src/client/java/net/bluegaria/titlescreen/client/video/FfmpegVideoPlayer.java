@@ -340,6 +340,7 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         this.pendingStartSilence = this.audioDelayMs < 0;
         this.anchorNanos = System.nanoTime();
         this.clockOffsetMs = 0L;
+        this.clockFloorMs = Long.MIN_VALUE;
         if (this.debug && this.videoCodecContext != null) {
             LOGGER.info("{}: {}x{} video, {} Hz x {} channel audio, {} ms",
                     file, this.sourceWidth, this.sourceHeight, audioRate, audioChannels, this.lengthMs);
@@ -546,8 +547,6 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         this.hwTransferFailures = 0;
         return true;
     }
-
-    // __PART_HW2__
 
     // ------------------------------------------------------------------
     // Decoding (decode thread)
@@ -911,72 +910,86 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         }
     }
 
-    /** Writes queued PCM; the blocking writes keep the sound on the device's own clock. */
+    /**
+     * Writes queued PCM to the output. The blocking writes pace the sound feed; whichever clock
+     * the picture runs on (see {@link #clockMs}), a fed output stays as close to it as it can.
+     */
     private void audioLoop() {
-        while (!this.closed) {
-            PcmChunk chunk;
-            try {
-                chunk = this.audioChunks.poll(20, TimeUnit.MILLISECONDS);
-            } catch (InterruptedException e) {
-                continue;
-            }
-            if (chunk == null) {
-                continue;
-            }
-            while (this.paused && !this.closed) {
-                sleepUnchecked(5);
-            }
-            if (this.closed) {
-                return;
-            }
-            int generation = this.audioSeekGeneration;
-            byte[] data = chunk.data();
-            this.audioOutput.write(data);
-            if (generation != this.audioSeekGeneration) {
-                // The chunk was in flight across a seek: its samples were flushed, and its
-                // position says nothing about the new playback position - re-anchor instead.
-                this.audioAnchorUs = Long.MIN_VALUE;
-                continue;
-            }
-            this.audioWrittenBytes += data.length;
-            if (chunk.ptsMs() >= 0) {
-                // The clock is what is audible right now: the line's media time (what the device
-                // has played) mapped onto the stream's timestamps at the anchor chunk. Scheduling
-                // the picture against the written position instead ran it ahead of the sound by
-                // everything still sitting in the audio output's buffer.
-                long mediaUs = this.audioOutput.mediaPositionUs();
-                if (this.audioAnchorUs == Long.MIN_VALUE) {
-                    this.audioAnchorUs = mediaUs;
-                    this.audioAnchorPtsMs = chunk.ptsMs();
-                    this.audioAnchorWrittenBytes = this.audioWrittenBytes;
-                    this.audioMediaUsFloor = mediaUs;
+        try {
+            while (!this.closed) {
+                PcmChunk chunk;
+                try {
+                    chunk = this.audioChunks.poll(20, TimeUnit.MILLISECONDS);
+                } catch (InterruptedException e) {
+                    continue;
                 }
-                // The device's position is derived from buffer availability and can be briefly
-                // wrong around underruns and sound-server round trips. Real playback never runs
-                // backwards and can never have played more than was written since the anchor:
-                // clamping both ways keeps a bogus report from leaping the clock forward (which
-                // the picture would chase, racing ahead of an audibly lagging sound).
-                long writtenUs = this.audioAnchorUs
-                        + (this.audioWrittenBytes - this.audioAnchorWrittenBytes) * 500_000L
-                            / Math.max(1, this.audioOutRate * Math.max(1, this.audioOutChannels));
-                if (mediaUs > writtenUs) {
-                    mediaUs = writtenUs;
+                if (chunk == null) {
+                    continue;
                 }
-                if (mediaUs < this.audioMediaUsFloor) {
-                    mediaUs = this.audioMediaUsFloor;
+                while (this.paused && !this.closed) {
+                    sleepUnchecked(5);
                 }
-                this.audioMediaUsFloor = mediaUs;
-                this.audioClockMs = Math.round(this.audioAnchorPtsMs
-                        + (mediaUs - this.audioAnchorUs) / 1000.0);
-                this.audioClockValid = true;
-                this.audioClockStampNanos = System.nanoTime();
-                if (this.mode == Mode.AUDIO) {
-                    // The audio-only player has no decode-side position: its cached time is the clock.
-                    // (A video player's cached time stays the decode thread's picture position.)
-                    this.cachedTimeMs = this.audioClockMs;
+                if (this.closed) {
+                    return;
                 }
+                int generation = this.audioSeekGeneration;
+                byte[] data = chunk.data();
+                this.audioOutput.write(data);
+                if (generation != this.audioSeekGeneration) {
+                    // The chunk was in flight across a seek: its samples were flushed, and its
+                    // position says nothing about the new playback position - re-anchor instead.
+                    this.audioAnchorUs = Long.MIN_VALUE;
+                    continue;
+                }
+                this.audioWrittenBytes += data.length;
+                if (chunk.ptsMs() >= 0) {
+                    updateAudioClock(chunk.ptsMs());
+                }
+                debugAvSync();
             }
-            debugAvSync();
+        } catch (Throwable t) {
+            // Never let the thread die silently: an audio-only player's decoder would block on its
+            // full queue forever, and nobody would know why the sound stopped.
+            LOGGER.warn("The audio output of {} failed - the video continues without sound", this.file, t);
+        }
+    }
+
+    /**
+     * Maps the output's media position onto the stream's timestamps. Only a position the output
+     * itself accounts for ({@link AudioOutput#positionTrustworthy()}) paces the picture; the rest
+     * use this as a diagnostic and as the audio-only player's reported position.
+     */
+    private void updateAudioClock(long chunkPtsMs) {
+        // The clock is what is audible right now: the output's media time (what the device has
+        // played) mapped onto the stream's timestamps at the anchor chunk.
+        long mediaUs = this.audioOutput.mediaPositionUs();
+        if (this.audioAnchorUs == Long.MIN_VALUE) {
+            this.audioAnchorUs = mediaUs;
+            this.audioAnchorPtsMs = chunkPtsMs;
+            this.audioAnchorWrittenBytes = this.audioWrittenBytes;
+            this.audioMediaUsFloor = mediaUs;
+        }
+        // The device's position is derived from buffer availability and can be briefly wrong
+        // around underruns and sound-server round trips. Real playback never runs backwards and
+        // can never have played more than was written since the anchor: clamping both ways keeps
+        // a bogus report from leaping the clock.
+        long writtenUs = this.audioAnchorUs
+                + (this.audioWrittenBytes - this.audioAnchorWrittenBytes) * 500_000L
+                    / Math.max(1, this.audioOutRate * Math.max(1, this.audioOutChannels));
+        if (mediaUs > writtenUs) {
+            mediaUs = writtenUs;
+        }
+        if (mediaUs < this.audioMediaUsFloor) {
+            mediaUs = this.audioMediaUsFloor;
+        }
+        this.audioMediaUsFloor = mediaUs;
+        this.audioClockMs = Math.round(this.audioAnchorPtsMs + (mediaUs - this.audioAnchorUs) / 1000.0);
+        this.audioClockValid = true;
+        this.audioClockStampNanos = System.nanoTime();
+        if (this.mode == Mode.AUDIO) {
+            // The audio-only player has no decode-side position: its cached time is the clock.
+            // (A video player's cached time stays the decode thread's picture position.)
+            this.cachedTimeMs = this.audioClockMs;
         }
     }
 
@@ -1030,7 +1043,6 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         // The demuxer restarts at the nearest keyframe, which can sit before the target: decoded
         // sound older than the target is dropped (see queueAudioFrame) instead of replayed.
         this.skipAudioUntilMs = targetMs;
-        this.audioClockMs = targetMs;
         this.cachedTimeMs = targetMs;
         this.pendingStartSilence = this.audioDelayMs < 0;
         this.clockOffsetMs = targetMs;
@@ -1040,10 +1052,11 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     }
 
     /**
-     * The playback clock: what is audible right now (derived by the audio thread from the device
-     * buffer), or the wall clock until the sound's position is known. The picture is scheduled
-     * against what the viewer hears - against the written position instead, it ran ahead of the
-     * sound by everything still sitting in the audio output's buffer.
+     * The playback clock the picture is paced against. The master is wall time; an output whose
+     * device position can be accounted for ({@link AudioOutput#positionTrustworthy()}, e.g. a
+     * {@code SourceDataLine}) lets the sound drive it instead, so picture and audio stay tightly
+     * glued. Either way the clock is monotonic between seeks and can never stall with a wedged
+     * output - a misbehaving sound degrades the sound, never the scene.
      */
     private long clockMs() {
         long value;

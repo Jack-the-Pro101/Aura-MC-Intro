@@ -4,7 +4,7 @@ import java.util.Locale;
 
 /**
  * The video's audio output, fed with 16-bit PCM by the player's audio thread - whose blocking
- * {@link #write(byte[])} is the playback clock.
+ * {@link #write(byte[])} paces the sound feed.
  *
  * <p>Two implementations exist, and {@link #open} picks between them: on Linux the sound goes
  * through {@link PulseAudioOutput} - the system sound server (PulseAudio, or PipeWire's
@@ -14,6 +14,10 @@ import java.util.Locale;
  * (Flatpak/Snap), where raw ALSA has no sound server behind it. Everywhere else - and on Linux
  * whenever libpulse cannot be loaded - {@link JavaSoundOutput} plays through Java Sound with a
  * deliberate device choice.</p>
+ *
+ * <p>Whether an implementation's {@link #mediaPositionUs()} is trustworthy enough to pace the
+ * picture against is declared by {@link #positionTrustworthy()}; the player's clock selection
+ * lives in {@code FfmpegVideoPlayer.clockMs()}.</p>
  */
 interface AudioOutput {
 

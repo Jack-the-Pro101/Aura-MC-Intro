@@ -20,9 +20,11 @@ import org.slf4j.LoggerFactory;
  * sound server behind it, so its devices are either missing (the "default" device) or raw hardware
  * bound to one specific jack.</p>
  *
- * <p>{@code pa_simple_write} blocks while the server-side buffer is full, which is the pacing
- * clock, exactly like a blocking {@code SourceDataLine.write}. The audible position is the
- * written position minus the server-reported latency.</p>
+ * <p>{@code pa_simple_write} blocks while the server-side buffer is full, which paces the feed
+ * exactly like a blocking {@code SourceDataLine.write}. Its reported latency is another matter:
+ * on PipeWire's PulseAudio layer it collapses to a permanent 0 after the first underrun, so
+ * {@link #mediaPositionUs()} is only a diagnostic estimate there and the player runs the picture
+ * on wall time (see {@link #positionTrustworthy()}).</p>
  */
 final class PulseAudioOutput implements AudioOutput {
 
@@ -271,7 +273,7 @@ final class PulseAudioOutput implements AudioOutput {
     }
 
     @Override
-    public void start() {
+    public synchronized void start() {
         // pa_simple has no separate running state: playback is driven by the writes, and the
         // audio thread parks by itself while the player is paused. Resuming only moves the
         // clock's reference point past the pause, so no wall time accrues while paused.
@@ -282,7 +284,7 @@ final class PulseAudioOutput implements AudioOutput {
     }
 
     @Override
-    public void stop() {
+    public synchronized void stop() {
         // No cork/flush on pause: a flush here re-arms the server's prebuf state and deadlocks a
         // clock-paced decoder. The audio thread parking is the pause; this only marks where the
         // playback clock's wall-time term has to stop.

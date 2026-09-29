@@ -260,9 +260,17 @@ While playing, the two clocks are also watched: if the sound holds a gap of more
 picture (or ~750 ms ahead of it) for longer than a hiccup, it is seeked onto the picture's position. This
 closes the one failure mode the open-loop design had: the first launches of a heavy modpack stall every
 thread for seconds at a time (JIT, cold caches, native library extraction), and whatever stalled used to
-stay behind for the rest of the playback - heard as the sound lagging the picture terribly. The clock
-itself is also sanitised: the device's reported position is clamped to what has actually been written and
-never allowed to move backwards, so a bogus report around an underrun cannot send the picture racing.
+stay behind for the rest of the playback - heard as the sound lagging the picture terribly.
+
+Inside one player the picture is paced against a single playback clock whose master is wall time: pauses
+freeze it, seeks re-anchor it, and it can neither stall nor race with whatever the sound output reports.
+An output whose device position can be fully accounted for (Java Sound's `SourceDataLine`) hands the clock
+to the sound instead, gluing picture and audio together sample-tightly; a sound server's reported latency
+cannot be trusted that far (after an underrun PipeWire's PulseAudio layer reports `0` forever), so there
+the sound plays best-effort under the wall clock. The demuxer additionally keeps ~400 ms of decoded audio
+ahead of the clock before its pacing may stall - without that cushion the audio stream runs empty at the
+first stutter and the sound cuts out - and when refilling it, far-ahead video frames are decoded but not
+converted or shown (the same frame-dropping a too-slow decoder causes, in the other direction).
 
 With `debugLogging: true` a heartbeat is logged every 5 s while a video is on screen (frame counters, alpha,
 positions, scene flags). It exists so that a stalled scene is visible in the log: a freeze that leaves no
