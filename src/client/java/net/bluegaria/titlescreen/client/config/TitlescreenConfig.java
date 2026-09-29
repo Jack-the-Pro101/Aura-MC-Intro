@@ -80,6 +80,13 @@ public class TitlescreenConfig implements ConfigData {
         public boolean debugLogging = false;
 
         /**
+         * Keep vanilla's menu music quiet while the video is playing, so it cannot talk over the
+         * video's own soundtrack. The music returns when the video has ended.
+         */
+        @ConfigEntry.Gui.Tooltip
+        public boolean suppressMenuMusic = true;
+
+        /**
          * Replays the intro every time the resource loading splash appears again (for example
          * after F3+T or when changing resource packs). Disabled by default so the intro only
          * plays once at startup.

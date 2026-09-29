@@ -105,11 +105,13 @@ if (project.bundle_video_libraries.toBoolean()) {
                 target.parentFile.mkdirs()
                 new java.util.zip.ZipFile(inputJar).withCloseable { zip ->
                     new java.util.zip.ZipOutputStream(new java.io.FileOutputStream(target)).withCloseable { out ->
+                        out.setLevel(java.util.zip.Deflater.BEST_COMPRESSION)
                         zip.entries().each { entry ->
                             def name = entry.name.tokenize('/')[-1]
                             def dropped = name.contains('avdevice') || name.contains('avfilter')
                                     || name.contains('postproc') || name.startsWith('jnijavacpp')
                                     || name in ['ffmpeg', 'ffprobe', 'ffmpeg.exe', 'ffprobe.exe']
+                                    || entry.name.startsWith('META-INF/native-image/')
                             if (dropped) {
                                 return
                             }

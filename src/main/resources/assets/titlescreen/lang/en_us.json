@@ -10,6 +10,8 @@
   "text.autoconfig.titlescreen.option.general.hideSplashText.@Tooltip": "Hides the rotating yellow splash text.",
   "text.autoconfig.titlescreen.option.general.debugLogging": "Debug logging",
   "text.autoconfig.titlescreen.option.general.debugLogging.@Tooltip": "Logs timing and video state changes - useful while tuning the timings.",
+  "text.autoconfig.titlescreen.option.general.suppressMenuMusic": "Suppress menu music during the video",
+  "text.autoconfig.titlescreen.option.general.suppressMenuMusic.@Tooltip": "Keep Minecraft's menu music quiet while the video is playing, so it cannot talk over the video's own soundtrack. The music returns when the video has ended.",
   "text.autoconfig.titlescreen.option.general.replayOnResourceReload": "Replay on resource reload",
   "text.autoconfig.titlescreen.option.general.replayOnResourceReload.@Tooltip": "Play the intro again whenever the loading splash appears (F3+T, resource pack changes).",
   "text.autoconfig.titlescreen.option.general.useBundledDefaultVideo": "Use bundled default video",

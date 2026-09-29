@@ -140,6 +140,7 @@ from the anchor is used after a few seconds so the loading screen still clears.
 | Option | Default | Description |
 | --- | --- | --- |
 | `enabled` | `true` | Master switch - disables every behaviour of the mod when off. |
+| `suppressMenuMusic` | `true` | Keep Minecraft's menu music quiet while the video is playing, so it cannot talk over the video's own soundtrack. The music returns when the video has ended. |
 | `fadeInAfterVideo` | `true` | Keep the "MINECRAFT" wordmark hidden while the video plays, and start fading it in the moment the video ends - so it cross-dissolves with the video's own fade-out. Off leaves the wordmark exactly as vanilla draws it. |
 | `hideSplashText` | `false` | Hides the rotating yellow splash text. |
 | `debugLogging` | `false` | Logs the intro state machine (useful while tuning timings). |
@@ -315,6 +316,32 @@ builds are remapped to intermediary names (classic Fabric tooling, `fabric-loom-
 builds compile directly against the unobfuscated jars (loom's non-obfuscated mode). Version-specific
 API differences are handled with Stonecutter comment conditions (`//? if ...`) and name swaps in
 `gradle/common.gradle`, so the same sources build everywhere.
+
+## Jar size
+
+The mod jar is large (~120 MB) because it bundles the prebuilt FFmpeg libraries for all five supported
+platforms (Windows/Linux/macOS, x86-64 and ARM64). The build already does everything possible with the
+prebuilt libraries:
+
+* Each platform's natives jar is trimmed to the libraries the player loads - `avutil`, `avcodec`,
+  `avformat`, `swresample`, `swscale` plus their JavaCPP JNI wrappers. Everything else in the jar
+  (`avdevice`, `avfilter`, the `ffmpeg`/`ffprobe` command line programs, GraalVM native-image metadata)
+  is stripped, and what remains was verified against each library's actual `NEEDED` dependencies
+  (`libavcodec` hard-links `libva`/`libavutil`/`libswresample`; `libavformat` links `libavcodec`;
+  everything else is a system library) - nothing kept can be removed, and nothing removed was loadable
+  without the rest.
+* The nested jars are written with maximum deflate; library payloads are stripped machine code and do
+  not compress further (measured: deflating harder saves kilobytes).
+
+What remains is the codecs themselves: `libavcodec` alone is 35 MB (25 MB compressed) because a prebuilt
+FFmpeg contains *all* codecs and every encoder, and a shared library cannot be slimmed after the fact.
+Playing one VP9 clip needs a fraction of that, so the only remaining lever is bundling a **custom
+minimal FFmpeg build** (`--disable-everything --enable-decoder=vp9,vorbis,opus --enable-demuxer=matroska
+--enable-swscale --enable-swresample --disable-vaapi ...`), which would shrink the jar to roughly
+**45-55 MB**. That requires cross-compiling FFmpeg for all five platforms (mingw-w64, osxcross, two
+Linux targets) and maintaining custom JavaCPP bindings in CI - an infrastructure project, not a build
+flag. Smaller levers without it: shipping per-platform jars (~25 MB each, but users must pick the right
+file), or removing platforms from `ffmpegPlatforms` in `gradle/common.gradle`.
 
 ## Licensing note
 

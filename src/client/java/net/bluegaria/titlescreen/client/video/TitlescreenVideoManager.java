@@ -169,6 +169,33 @@ public final class TitlescreenVideoManager {
         guard("the client tick", () -> tick(minecraft));
     }
 
+    private static final Logger VIDEO_LOGGER = LoggerFactory.getLogger("Titlescreen/Video");
+
+    /** One-shot debug line when the menu music is first suppressed (see MusicManagerMixin). */
+    public static void logMenuMusicSuppressed() {
+        if (TitlescreenConfigHolder.get().general.debugLogging) {
+            VIDEO_LOGGER.info("Menu music suppressed while the video plays");
+        }
+    }
+
+    /**
+     * Whether vanilla's menu music should stay quiet because the video is supplying the title
+     * screen's sound (the {@code suppressMenuMusic} option). True from the moment a session starts
+     * until the intro's sound is over - the fade-out, a stop, or a freeze after the end - so the
+     * game's own soundtrack comes back exactly when the clip is done talking.
+     */
+    public boolean suppressMenuMusic() {
+        TitlescreenConfig cfg = TitlescreenConfigHolder.get();
+        if (!cfg.general.enabled || !cfg.general.suppressMenuMusic) {
+            return false;
+        }
+        boolean introPlaying = (this.sessionActive || this.startRequested)
+                && !this.ended && !this.player.isFinished();
+        boolean backgroundPlaying = (this.backgroundActive || this.backgroundStartRequested)
+                && !this.backgroundPlayer.isFinished();
+        return introPlaying || backgroundPlaying;
+    }
+
     private void tick(Minecraft minecraft) {
         this.lastTickMs = Util.getMillis();
         TitlescreenConfig cfg = TitlescreenConfigHolder.get();
