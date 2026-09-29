@@ -1,8 +1,8 @@
 name: Build minimal FFmpeg
 
-# Builds the small FFmpeg libraries the mod bundles (VP9/Opus/Vorbis + Matroska + swscale only)
-# for every supported platform, caches them, and attaches them to a permanent GitHub release so
-# local Gradle builds can use them through the `ffmpeg_libraries` property. The release tag is
+# Builds the small FFmpeg libraries the mod bundles (VP9/Opus decoders, Matroska demuxing,
+# swscale/swresample and VP9-only hardware acceleration) for every supported platform, caches
+# them, and attaches them to a permanent GitHub release so local Gradle builds can use them
 # derived from the FFmpeg version; re-running the workflow replaces the assets.
 #
 #   gradle.properties:  ffmpeg_libraries=<folder containing the downloaded per-platform zips>
@@ -66,11 +66,16 @@ jobs:
           # somehow not visible to pkg-config.
           pkg-config --modversion ffnvcodec
 
+      # Cache only the downloaded tarball, never the extracted tree: the tree contains object
+      # files for whatever platform built it, and this key is shared by the whole matrix.
+      # Restoring another platform's tree made the linkers choke on foreign-architecture
+      # objects ("Relocations in generic ELF (EM: 183)"). Extracting per job is cheap and
+      # always clean; the script additionally runs `make distclean` before configuring.
       - name: Cache FFmpeg sources
         uses: actions/cache@v4
         with:
-          path: sources
-          key: ffmpeg-src-${{ env.FFMPEG_VERSION }}
+          path: sources/ffmpeg.tar.xz
+          key: ffmpeg-src-tarball-${{ env.FFMPEG_VERSION }}
 
       - name: Restore build output
         id: build-cache

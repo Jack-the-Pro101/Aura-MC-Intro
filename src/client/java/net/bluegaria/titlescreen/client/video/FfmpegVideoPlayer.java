@@ -39,7 +39,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * FFmpeg based {@link VideoPlayer} using the libraries bundled with the mod.
  *
  * <p>libavformat demuxes the container (WebM/Matroska), libavcodec decodes VP9 video and
- * Opus/Vorbis audio - with frame multithreading, which is what keeps 4K software decoding
+ * Opus audio - with frame multithreading, which is what keeps 4K software decoding
  * playable - and libswscale converts every picture to RGBA, the format the texture layer
  * expects. The sound is resampled to 16-bit PCM by libswresample and handed to
  * {@link AudioOutput}, so the audio no longer runs through Minecraft's sound engine or any

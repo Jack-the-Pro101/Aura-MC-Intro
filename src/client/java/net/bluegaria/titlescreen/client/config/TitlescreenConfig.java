@@ -106,7 +106,7 @@ public class TitlescreenConfig implements ConfigData {
         /**
          * Path to the intro video, relative to the Minecraft game directory (or an absolute path). When a
          * file is there it is used; otherwise the mod's own bundled video plays. A .webm with VP9 video
-         * and an Opus/Vorbis audio track is recommended.
+         * and an Opus audio track is recommended.
          */
         @ConfigEntry.Gui.Tooltip
         public String videoPath = "config/titlescreen/intro.webm";

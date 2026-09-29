@@ -316,7 +316,7 @@ dependencies {
 
     // Video playback: FFmpeg is bundled with the mod (JavaCPP presets), so nothing has to be
     // installed on the system. libavformat demuxes the WebM container, libavcodec decodes
-    // (VP9 video, Opus/Vorbis audio), libswscale converts pictures to RGBA and libswresample
+    // (VP9 video, Opus audio), libswscale converts pictures to RGBA and libswresample
     // resamples the sound for audio output.
     implementation "org.bytedeco:javacpp:${project.javacpp_version}"
     implementation "org.bytedeco:ffmpeg:${project.ffmpeg_version}"

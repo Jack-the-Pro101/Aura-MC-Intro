@@ -52,7 +52,7 @@ Everything is configurable in-game through **Mod Menu → Config** (Cloth Config
 
 ## Recommended video format
 
-Use **WebM with 8-bit VP9 video and an Opus/Vorbis audio track**:
+Use **WebM with 8-bit VP9 video and an Opus audio track**:
 
 ```bash
 ffmpeg -i input.mov -c:v libvpx-vp9 -pix_fmt yuv420p -crf 28 -b:v 0 -deadline good -cpu-used 3 \
@@ -75,7 +75,8 @@ transparency tricks. All `timing` values stay relative to the first frame visibl
 and the loading scene keeps its own look via `loadingBackground.fadeInMs` / `opacity` / `fit`.
 
 Because the whole thing is opaque, nothing here depends on alpha support: it is a single ordinary
-video (VP8/VP9 WebM, H.264 MP4, whatever FFmpeg can decode).
+video (VP9/Opus WebM with the minimal libraries; anything FFmpeg can decode when the full
+bytedeco libraries are in use).
 
 - **Resolution**: frames are decoded at the video's native size and converted to RGBA by FFmpeg's own
   scaler (`swscale`) on the decode threads, which use every core through VP9 frame threading. The cost
@@ -341,8 +342,8 @@ Playing one VP9 clip needs a fraction of that - which is what the **custom minim
 ## Minimal FFmpeg build (GitHub Actions)
 
 `.github/workflows/ffmpeg.yml` builds a minimal FFmpeg (`--disable-everything`, only the Matroska
-demuxer, VP9/VP8/Opus/Vorbis decoders and parsers, the file protocol, swscale and swresample - no
-encoders, no network) **with hardware decoding included** (VAAPI + NVDEC on Linux, D3D11VA/DXVA2 on
+demuxer, VP9/Opus decoders and parsers, the file protocol, swscale and swresample - no encoders, no
+network) **with VP9 hardware decoding included** (VAAPI + NVDEC on Linux, D3D11VA/DXVA2 on
 Windows, VideoToolbox on macOS) for all five platforms: Linux x86-64 and ARM64 natively/cross-compiled
 on Ubuntu, Windows x86-64 through mingw-w64 on Ubuntu, and macOS through the native GitHub runners. The
 sources are downloaded once and cached, the build outputs are cached against the build script's hash, the

@@ -6,7 +6,9 @@
 #
 # Produces out/ffmpeg-<version>-min-<platform>.zip containing the five libraries with the exact
 # file names the JavaCPP preset expects (identical to the bytedeco builds' names, since the same
-# FFmpeg release is built - only with everything the player never touches disabled). The zip is
+# FFmpeg release is built - only with everything the player never touches disabled: Matroska/WebM
+# demuxing, VP9 + Opus decoding, VP9-only hardware acceleration and the swscale/swresample
+# converters). The zip is
 # consumed by the Gradle build via the ffmpeg_libraries property; the GitHub Actions workflow
 # (.github/workflows/ffmpeg.yml) runs this script for all five platforms.
 #
@@ -35,7 +37,11 @@ case "$PLATFORM" in
       # configure's --disable-autodetect turns the ffnvcodec probe off, which
       # leaves --enable-nvdec/--enable-cuda unsatisfiable ("cuda requested,
       # but not all dependencies are satisfied: ffnvcodec").
-      HWACCEL=(--enable-vaapi --enable-ffnvcodec --enable-nvdec --enable-cuda --enable-hwaccels)
+      # Only the VP9 hwaccels are enabled; the blanket --enable-hwaccels would turn on every
+      # hwaccel, and each of those drags its parent decoder (av1, h264, hevc, vc1, ...) into
+      # libavcodec with it.
+      HWACCEL=(--enable-vaapi --enable-ffnvcodec --enable-nvdec --enable-cuda
+        --enable-hwaccel=vp9_vaapi --enable-hwaccel=vp9_nvdec)
     else
       HWACCEL=()
     fi
@@ -50,12 +56,13 @@ case "$PLATFORM" in
     # -static-libgcc keeps them free of a libgcc one. D3D11VA/DXVA2 use system headers.
     CROSS=(--enable-cross-compile --cross-prefix=x86_64-w64-mingw32- --arch=x86_64 --target-os=mingw32 --extra-ldflags=-static-libgcc)
     LIBS=("${WINDOWS_LIBS[@]}")
-    HWACCEL=(--enable-d3d11va --enable-dxva2 --enable-hwaccels)
+    HWACCEL=(--enable-d3d11va --enable-dxva2
+      --enable-hwaccel=vp9_d3d11va --enable-hwaccel=vp9_d3d11va2 --enable-hwaccel=vp9_dxva2)
     ;;
   macosx-arm64|macosx-x86_64)
     CROSS=()
     LIBS=("${MACOS_LIBS[@]}")
-    HWACCEL=(--enable-videotoolbox --enable-hwaccels)
+    HWACCEL=(--enable-videotoolbox --enable-hwaccel=vp9_videotoolbox)
     ;;
   *)
     echo "unknown platform: $PLATFORM" >&2
@@ -68,27 +75,40 @@ mkdir -p "$REPO_ROOT/$OUT_DIR" "$REPO_ROOT/sources"
 cd "$REPO_ROOT/sources"
 
 if [ ! -d "ffmpeg-$FFMPEG_VERSION" ]; then
-  echo "Downloading FFmpeg $FFMPEG_VERSION sources"
-  curl -fsSL -o ffmpeg.tar.xz "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz"
+  # Reuse an already downloaded tarball (the workflow caches exactly that file) before
+  # hitting the network.
+  if [ ! -f ffmpeg.tar.xz ]; then
+    echo "Downloading FFmpeg $FFMPEG_VERSION sources"
+    curl -fsSL -o ffmpeg.tar.xz "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz"
+  fi
   tar -xf ffmpeg.tar.xz
 fi
 cd "ffmpeg-$FFMPEG_VERSION"
 
+# The tree may already contain build output for a *different* platform (local builds for several
+# platforms share sources/, and an earlier version of the workflow even cached the built tree
+# across the whole matrix). Leftover objects would be linked into this platform's libraries and
+# fail with "error adding symbols: file in wrong format", so always start from a pristine tree.
+make distclean >/dev/null 2>&1 || true
+
 echo "Configuring FFmpeg $FFMPEG_VERSION for $PLATFORM"
+# ${ARR[@]+"${ARR[@]}"} instead of "${ARR[@]}": macOS still ships bash 3.2, where expanding an
+# empty array under `set -u` aborts with "CROSS[@]: unbound variable" (HWACCEL and CROSS are
+# empty on some platforms).
 ./configure \
   --prefix="$REPO_ROOT/$OUT_DIR/$PLATFORM" \
   --enable-shared --disable-static \
   --disable-programs --disable-doc --disable-debug --disable-autodetect \
   --disable-everything \
   --enable-demuxer=matroska \
-  --enable-decoder=vp9 --enable-decoder=vp8 --enable-decoder=opus --enable-decoder=vorbis \
-  --enable-parser=vp9 --enable-parser=opus --enable-parser=vorbis \
+  --enable-decoder=vp9 --enable-decoder=opus \
+  --enable-parser=vp9 --enable-parser=opus \
   --enable-protocol=file \
   --disable-network --disable-hwaccels \
   --extra-cflags=-Os \
   ${EXTRA_CONFIGURE:-} \
-  "${HWACCEL[@]}" \
-  "${CROSS[@]}"
+  ${HWACCEL[@]+"${HWACCEL[@]}"} \
+  ${CROSS[@]+"${CROSS[@]}"}
 
 make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 rm -rf "$REPO_ROOT/$OUT_DIR/$PLATFORM"
@@ -113,9 +133,11 @@ done
 if [[ "$PLATFORM" == macosx-* ]]; then
   for lib in "${LIBS[@]}"; do
     install_name_tool -id "$lib" "$STAGE/$lib"
+    # libavutil itself has no libav/sw dependency, so the grep can legitimately come up empty;
+    # with `set -o pipefail` that would otherwise abort the script (grep exits 1 on no match).
     otool -L "$STAGE/$lib" | awk '{print $1}' | grep -E 'libav(codec|format|util)|libsw(resample|scale)' | while read -r dep; do
       install_name_tool -change "$dep" "$(basename "$dep")" "$STAGE/$lib"
-    done
+    done || true
     codesign --force --sign - "$STAGE/$lib"
   done
 fi
