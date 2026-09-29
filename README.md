@@ -80,9 +80,21 @@ bytedeco libraries are in use).
 
 - **Resolution**: frames are decoded at the video's native size and converted to RGBA by FFmpeg's own
   scaler (`swscale`) on the decode threads, which use every core through VP9 frame threading. The cost
-  per displayed frame is one copy into the texture plus the GPU upload - the alpha handling for the
-  opaque scenes happens on the decode thread. If a 4K clip is too much for the machine anyway,
-  `videoMaxFps` / `loadingBackground.maxFps` bound how often a frame is uploaded.
+  per displayed frame is a single GPU upload: the render thread hands the converted buffer straight to
+  the device's command encoder, without the detour through Minecraft's own texture-image copy. The alpha
+  handling for the opaque scenes happens on the decode thread. If a 4K clip is too much for the machine
+  anyway, `videoMaxFps` / `loadingBackground.maxFps` bound how often a frame is uploaded.
+- **Hardware decoding boundary**: with `hardwareDecoding` on, the *decoding* runs on the GPU, but the
+  finished frame is downloaded to system memory once, converted to RGBA, and uploaded to the GPU once as
+  the video texture. Truly GPU-resident playback (decoding straight into a texture the game renders
+  from) is not reachable from this architecture: FFmpeg's hwaccel output is a VAAPI surface, CUDA array,
+  D3D11 texture or VideoToolbox pixel buffer, and importing those into Minecraft's OpenGL/Vulkan context
+  needs per-platform interop APIs (EGL dma-buf export, `WGL_NV_dx_interop2`, IOSurface textures) that
+  neither FFmpeg nor its Java bindings expose portably. Minecraft's Windows GL context cannot import
+  D3D11 textures at all outside vendor-specific extensions, and macOS' IOSurface path needs
+  unnormalized rectangle-texture sampling the GUI pipeline does not offer. Players that do zero-copy
+  (mpv, VLC) own their GL context and ship that per-platform interop themselves; the win here is that
+  decoding - by far the most expensive stage - runs on dedicated silicon either way.
 - **Audio**: the sound comes from the video itself, so the file has to contain an audio track
   (`ffprobe intro.webm` shows the streams). The mod logs which files have no audio track, and each
   video has its own **volume** option - the loading background defaults to `0`, so raise it (e.g. to

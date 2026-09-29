@@ -7,7 +7,8 @@ This folder holds the minimal FFmpeg builds the mod bundles instead of the byted
 To (re)populate it:
 
 1. Run the **Build minimal FFmpeg** workflow from the repository's Actions tab (it is
-   manual-only; the libraries rarely change).
+   manual-only; the libraries rarely change). NOTE: GitHub puts artifacts into a zip, so
+   the downloaded zips have the actual zips inside them. Extract them, zip-ception.
 2. Download the five `ffmpeg-<version>-min-<platform>.zip` files from the finished run's
    Artifacts section (each artifact contains exactly one zip).
 3. Drop the zips into this folder and commit them.

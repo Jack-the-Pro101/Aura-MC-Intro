@@ -12,13 +12,14 @@ import java.nio.ByteBuffer;
  * Bridges the decoder's frame-producing thread with the render thread.
  *
  * <p>The decoder converts each frame directly into one of three staging buffers and publishes it; the
- * render thread copies the newest published frame straight into the texture's {@link NativeImage} and
- * uploads it. The producer always writes into the buffer after the published one, so the buffer the
- * render thread is reading is never touched - no producer-side copy, no lock held during conversion,
- * and frames produced while the render thread is busy are dropped, which is what an intro video wants
- * - a late frame is worse than a skipped one.</p>
+ * render thread uploads the newest published buffer straight into the texture's GPU storage
+ * ({@link VideoTextureUploader} - no detour through the texture's own {@link NativeImage} copy). The
+ * producer always writes into the buffer after the
+ * published one, so the buffer the render thread is reading is never touched - no producer-side copy,
+ * no lock held during conversion, and frames produced while the render thread is busy are dropped,
+ * which is what an intro video wants - a late frame is worse than a skipped one.</p>
  *
- * <p>Everything the render thread does per frame is one copy plus the upload. In particular the alpha
+ * <p>Everything the render thread does per frame is the upload itself. In particular the alpha
  * masking for an opaque scene happens on the decode thread (see {@link #setForceOpaque}), where there is
  * spare time: doing it per pixel on the render thread cost more than everything else in the frame
  * combined at 4K.</p>
@@ -152,9 +153,15 @@ public final class VideoFrameSink {
                 }
                 this.lastUploadNanos = now;
             }
-            // Copied under the lock so a concurrent producer cannot reuse this buffer half-way through.
+            // Uploaded under the lock so a concurrent producer cannot reuse this buffer half-way
+            // through; from the moment the call returns, the GPU owns the bytes it read.
             this.dirty = false;
-            MemoryUtil.memCopy(MemoryUtil.memAddress(this.buffers[this.latestIndex]), image.getPointer(),
+            ByteBuffer frame = this.buffers[this.latestIndex];
+            frame.clear();
+            if (VideoTextureUploader.uploadRgba(texture, frame, this.width, this.height)) {
+                return true;
+            }
+            MemoryUtil.memCopy(MemoryUtil.memAddress(frame), image.getPointer(),
                     (long) this.width * this.height * BYTES_PER_PIXEL);
         }
         texture.upload();
@@ -178,10 +185,15 @@ public final class VideoFrameSink {
                 return false;
             }
             NativeImage image = texture.getPixels();
-            if (image.getWidth() != this.width || image.getHeight() != this.height) {
+            if (image == null || image.getWidth() != this.width || image.getHeight() != this.height) {
                 return false;
             }
-            MemoryUtil.memCopy(MemoryUtil.memAddress(this.buffers[this.latestIndex]), image.getPointer(),
+            ByteBuffer frame = this.buffers[this.latestIndex];
+            frame.clear();
+            if (VideoTextureUploader.uploadRgba(texture, frame, this.width, this.height)) {
+                return true;
+            }
+            MemoryUtil.memCopy(MemoryUtil.memAddress(frame), image.getPointer(),
                     (long) this.width * this.height * BYTES_PER_PIXEL);
         }
         texture.upload();
