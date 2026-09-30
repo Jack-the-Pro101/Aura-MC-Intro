@@ -48,6 +48,14 @@ public final class VideoFrameSink {
     private int alphaProbeFrames = ALPHA_PROBE_FRAMES;
     private boolean alphaPresent;
 
+    /**
+     * On-screen size (physical pixels) the picture is being drawn at, as last seen by the render
+     * thread. Zero while unknown; the producer then converts at the source resolution. Read by the
+     * decode thread to scale oversized sources down during the RGBA conversion.
+     */
+    private volatile int outputWidth;
+    private volatile int outputHeight;
+
     private long producedFrames;
     private long lastUploadNanos;
 
@@ -63,6 +71,31 @@ public final class VideoFrameSink {
      */
     public void setForceOpaque(boolean forceOpaque) {
         this.forceOpaque = forceOpaque;
+    }
+
+    /**
+     * Tells the producer the physical pixel size the picture is being drawn at, so a source larger
+     * than the window can be scaled during the RGBA conversion instead of being converted and
+     * uploaded at full size only for the GPU to throw most of the pixels away again. Written by the
+     * render thread on every drawn frame (which is also what keeps window resizes tracked);
+     * non-positive sizes are ignored.
+     */
+    public void noteOutputSize(int width, int height) {
+        if (width <= 0 || height <= 0) {
+            return;
+        }
+        this.outputWidth = width;
+        this.outputHeight = height;
+    }
+
+    /** Physical width the picture is being drawn at, or {@code 0} while unknown. */
+    public int outputWidth() {
+        return this.outputWidth;
+    }
+
+    /** Physical height the picture is being drawn at, or {@code 0} while unknown. */
+    public int outputHeight() {
+        return this.outputHeight;
     }
 
     /**

@@ -92,11 +92,16 @@ video (VP9/Opus WebM with the minimal libraries; anything FFmpeg can decode when
 bytedeco libraries are in use).
 
 - **Resolution**: frames are decoded at the video's native size and converted to RGBA by FFmpeg's own
-  scaler (`swscale`) on the decode threads, which use every core through VP9 frame threading. The cost
-  per displayed frame is a single GPU upload: the render thread hands the converted buffer straight to
-  the device's command encoder, without the detour through Minecraft's own texture-image copy. The alpha
-  handling for the opaque scenes happens on the decode thread. If a 4K clip is too much for the machine
-  anyway, `videoMaxFps` / `loadingBackground.maxFps` bound how often a frame is uploaded.
+  scaler (`swscale`) on the decode thread, which uses every core through VP9 frame threading for software
+  decoding. A source larger than the window is scaled to window size in the same scaler pass - a 4K clip
+  on a 1440p screen then costs a fraction of the pixels to convert, copy and upload, at identical
+  sharpness (the source is never upscaled). The cost per displayed frame is a single GPU upload: the
+  render thread hands the converted buffer straight to the device's command encoder, without the detour
+  through Minecraft's own texture-image copy. The alpha handling for the opaque scenes happens on the
+  decode thread, which runs at normal priority - demoting it below normal once starved the whole picture
+  pipeline on Windows, one of the platforms that actually enforce Java thread priorities. If a clip is
+  still too much for the machine, `videoMaxFps` / `loadingBackground.maxFps` bound how often a frame is
+  uploaded.
 - **Hardware decoding boundary**: with `hardwareDecoding` on, the *decoding* runs on the GPU, but the
   finished frame is downloaded to system memory once, converted to RGBA, and uploaded to the GPU once as
   the video texture. Truly GPU-resident playback (decoding straight into a texture the game renders
@@ -179,6 +184,7 @@ from the anchor is used after a few seconds so the loading screen still clears.
 | `audioDelayMs`      | `0`                             | Shifts a baked video's sound relative to its picture in milliseconds. Positive plays the sound later. Only used when `audioInSamePlayer` is off - with one player for both streams they share a clock and need no delay. Tune by ear; a faster machine needs less, or a negative value.            |
 | `audioInSamePlayer` | `true`                          | Play the sound inside the video player: one clock, so no drift and no delay needed, and the decoder keeps the sound on time by dropping late video frames. Off = a separate audio-only player, which a slow video pipeline cannot starve; that player is also resynchronised to the picture automatically whenever it falls behind or runs ahead by more than a fraction of a second. |
 | `videoAudioDevice`  | *(empty - automatic)*           | Output device the video's sound plays through. Empty follows the system's default output - the same one the game's own sound uses. On Linux this is a sink name as shown by the desktop's audio widget (e.g. the name of your headphones); only when the system sound server is unreachable is it a Java Sound mixer name instead (the log lists them). |
+| `audioLatencyMs`    | `0`                             | Delays the picture by this many milliseconds relative to the sound pipeline's reported position - compensation for output latency the program cannot measure. Bluetooth headphones are the typical case (the whole audio chain buffers more sound than the device position admits, so the picture otherwise runs ahead of what is heard); they usually want 150-500. |
 | `videoOpacity`      | `100`                           | Extra opacity multiplier on top of the video's alpha.                                                                                                                                                                                                                                              |
 | `videoFit`          | `COVER`                         | `COVER` (crop), `CONTAIN` (letterbox) or `STRETCH`.                                                                                                                                                                                                                                                |
 | `videoMaxFps`       | `60`                            | Upper bound for GPU texture uploads per second, `0` = unlimited.                                                                                                                                                                                                                                   |

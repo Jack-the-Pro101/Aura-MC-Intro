@@ -140,7 +140,7 @@ echo "Configuring FFmpeg $FFMPEG_VERSION for $PLATFORM"
   --enable-parser=vp9 --enable-parser=opus \
   --enable-protocol=file \
   --disable-network --disable-hwaccels \
-  --extra-cflags=-Os \
+  --extra-cflags=-O3 \
   ${EXTRA_CONFIGURE:-} \
   ${HWACCEL[@]+"${HWACCEL[@]}"} \
   ${CROSS[@]+"${CROSS[@]}"}

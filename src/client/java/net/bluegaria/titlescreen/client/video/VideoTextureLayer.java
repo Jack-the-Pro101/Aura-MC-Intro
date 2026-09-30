@@ -145,6 +145,11 @@ public final class VideoTextureLayer {
         if (guiWidth <= 0 || guiHeight <= 0) {
             return false;
         }
+        // How large the picture is on screen, in physical pixels: the producer scales a source
+        // bigger than that down during its RGBA conversion (see VideoFrameSink.noteOutputSize).
+        // Written on every drawn frame, so window resizes track along on their own.
+        int guiScale = Minecraft.getInstance().getWindow().getGuiScale();
+        sink.noteOutputSize(guiWidth * guiScale, guiHeight * guiScale);
 
         float[] rect = fitRect(fit, aspectWidth, aspectHeight, guiWidth, guiHeight);
         // The 1.21.x branch below: GuiGraphics.innerBlit takes its int coordinates as

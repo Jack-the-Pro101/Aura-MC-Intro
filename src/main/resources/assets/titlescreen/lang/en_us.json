@@ -28,6 +28,8 @@
   "text.autoconfig.titlescreen.option.video.audioDelayMs.@Tooltip": "Shifts a baked video's sound relative to its picture. Positive plays the sound later - the fix when the sound runs ahead of the picture.",
   "text.autoconfig.titlescreen.option.video.videoAudioDevice": "Audio output device",
   "text.autoconfig.titlescreen.option.video.videoAudioDevice.@Tooltip": "Output device the video's sound plays through. Empty follows the system's default output - the same one the game's own sound uses. On Linux this is a sink name as shown by the desktop's audio widget (e.g. the name of your headphones); only when the system sound server is unreachable is it a Java Sound mixer name instead (the log lists them).",
+  "text.autoconfig.titlescreen.option.video.audioLatencyMs": "Audio latency compensation (ms)",
+  "text.autoconfig.titlescreen.option.video.audioLatencyMs.@Tooltip": "Delays the picture by this many milliseconds relative to the sound pipeline's position, to line it up with what is actually heard. Raise it when the video runs ahead of the sound - Bluetooth headphones typically need 150-500.",
   "text.autoconfig.titlescreen.option.video.videoOpacity": "Opacity (%)",
   "text.autoconfig.titlescreen.option.video.videoOpacity.@Tooltip": "Extra opacity multiplier on top of the video's own alpha channel.",
   "text.autoconfig.titlescreen.option.video.videoFit": "Fit mode",

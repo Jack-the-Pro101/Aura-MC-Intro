@@ -138,6 +138,16 @@ public class TitlescreenConfig implements ConfigData {
         public int audioDelayMs = 0;
 
         /**
+         * Compensation for output latency the program cannot measure, in milliseconds: it delays the
+         * picture by this amount relative to the position the sound pipeline reports. Raise it when
+         * the video runs ahead of what is actually heard - Bluetooth headphones are the typical case,
+         * where the whole audio chain buffers far more sound than the device position admits.
+         */
+        @ConfigEntry.Gui.Tooltip
+        @ConfigEntry.BoundedDiscrete(min = -1000, max = 2000)
+        public int audioLatencyMs = 0;
+
+        /**
          * Output device for the video's sound. On Linux, where the sound plays through the system
          * sound server (the same route as the game's own sound), this is a sink name as shown by
          * the desktop's audio widget (e.g. {@code WH-CH520}); when the sound server cannot be used
@@ -476,6 +486,7 @@ public class TitlescreenConfig implements ConfigData {
         this.video.videoOpacity = clamp(this.video.videoOpacity, 0, 100);
         this.video.videoMaxFps = clamp(this.video.videoMaxFps, 0, 240);
         this.video.audioDelayMs = clamp(this.video.audioDelayMs, -2000, 2000);
+        this.video.audioLatencyMs = clamp(this.video.audioLatencyMs, -1000, 2000);
 
         Timing t = this.timing;
         t.videoStartDelayMs = Math.max(0, t.videoStartDelayMs);

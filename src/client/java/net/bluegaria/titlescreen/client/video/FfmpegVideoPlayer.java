@@ -153,6 +153,11 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     private volatile long seekRequestMs = -1L;
     private volatile long audioDelayMs;
     private volatile boolean pauseAfterFirstFrame;
+    /**
+     * Output-latency compensation in milliseconds (see {@link #videoClockMs}). Written from the
+     * client thread when the players are configured; read on the decode thread.
+     */
+    private volatile int audioLatencyMs;
     private volatile boolean preloaded;
 
     // Playback position, cached from the decode/audio threads for the client thread.
@@ -184,7 +189,9 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
 
     private Thread decodeThread;
     private Thread audioThread;
-    private final BlockingQueue<PcmChunk> audioChunks = new ArrayBlockingQueue<>(64);
+    // ~4 s of 20 ms Opus frames: deep enough that a Bluetooth/Windows output chain, whose line
+    // accepts bursts far faster than it can be heard, never forces the decode side to drop chunks.
+    private final BlockingQueue<PcmChunk> audioChunks = new ArrayBlockingQueue<>(192);
 
     // FFmpeg objects: created in open(), used only by the decode thread, freed in close().
     private AVFormatContext formatContext;
@@ -202,6 +209,9 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     private int swsFormat = -1;
     private int swsWidth = -1;
     private int swsHeight = -1;
+    /** Output size of the conversion; equals the source size unless the screen is smaller. */
+    private int swsOutWidth = -1;
+    private int swsOutHeight = -1;
     private AVFrame rgbaFrame;
 
     private SwrContext swrContext;
@@ -233,9 +243,16 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     private long clockOffsetMs;
     /** Whether {@link #audioClockMs} paces the picture; untrustworthy outputs run on wall time. */
     private volatile boolean useAudioClock;
-    /** The playback clock never steps backwards between seeks (see {@link #clockMs}). */
-    private long clockFloorMs = Long.MIN_VALUE;
-    private long lastVideoPtsMs = -1L;
+    /**
+     * The playback clock never steps backwards between seeks (see {@link #clockMs}). Volatile: it
+     * is also reset from the audio thread when the clock re-anchors after a seek.
+     */
+    private volatile long clockFloorMs = Long.MIN_VALUE;
+    /**
+     * Picture position of the newest decoded frame. Volatile: the audio thread's A/V hold reads it
+     * while the decode thread writes it, and its freshness decides how long the sound waits.
+     */
+    private volatile long lastVideoPtsMs = -1L;
     private long skipFramesUntilMs = -1L;
     private boolean singleFrameAfterSeek;
     private boolean pendingStartSilence;
@@ -348,10 +365,17 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
 
         this.decodeThread = new Thread(this::decodeLoop, "Titlescreen-FFmpeg-Decode");
         this.decodeThread.setDaemon(true);
-        // Best effort, but it matters on the heavy first launches: the picture may drop frames by
-        // design, the sound must not be starved by the video pipeline when the machine is loaded.
+        // Normal priority, deliberately. This thread carries the whole per-frame serial chain of
+        // the picture (the hardware-frame download, the RGBA conversion) and used to sit one notch
+        // below normal so a loaded machine would starve the picture before the sound - but Windows
+        // is one of the platforms that actually enforce Java thread priorities: while the game's
+        // worker threads saturate every core during start-up, a below-normal decoder is starved
+        // and pushed onto the E-cores of a hybrid CPU, which showed up as the loading video
+        // producing about three frames per second on an otherwise fast machine. Linux ignores the
+        // priority hints, so the two platforms behaved completely differently. The sound thread
+        // below keeps its notch above this one.
         try {
-            this.decodeThread.setPriority(Thread.NORM_PRIORITY - 1);
+            this.decodeThread.setPriority(Thread.NORM_PRIORITY);
         } catch (Throwable ignored) {
             // Priority adjustments are a hint, never a requirement.
         }
@@ -524,11 +548,19 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     }
 
     /**
-     * Downloads a hardware-decoded frame into system memory (NV12) so the usual swscale
-     * conversion can run on it.
+     * Downloads a hardware-decoded frame into system memory so the usual swscale conversion can
+     * run on it.
+     *
+     * <p>The download format is deliberately left as {@code AV_PIX_FMT_NONE}: FFmpeg then picks
+     * the hardware frames context's own download format (for D3D11VA/VAAPI/CUDA/VideoToolbox that
+     * is the context's {@code sw_format} - NV12 for 8-bit VP9, P010 for 10-bit). Requesting a
+     * fixed format instead made every transfer of a 10-bit clip fail, because the hwaccels reject
+     * a destination format that does not match the frames context - three failures later the
+     * hardware path was declared broken for the whole session and the clip fell back to a
+     * software 10-bit decode, which is exactly the "unplayably slow" case.</p>
      */
     private boolean downloadHwFrame(AVFrame hwFrame) {
-        this.swFrame.format(avutil.AV_PIX_FMT_NV12);
+        this.swFrame.format(avutil.AV_PIX_FMT_NONE);
         this.swFrame.width(hwFrame.width());
         this.swFrame.height(hwFrame.height());
         if (avutil.av_hwframe_transfer_data(this.swFrame, hwFrame, 0) < 0) {
@@ -570,7 +602,7 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
                     this.singleFrameAfterSeek = false;
                 }
                 if (this.lastVideoPtsMs >= 0L
-                        && this.lastVideoPtsMs + this.frameDurationMs - clockMs() > MAX_VIDEO_LEAD_MS
+                        && this.lastVideoPtsMs + this.frameDurationMs - videoClockMs() > MAX_VIDEO_LEAD_MS
                         && audioCushionSufficient()) {
                     // Paced: stay a few frames ahead of the clock at most, so the picture can
                     // never run away from the sound - but only once the sound has its cushion
@@ -660,7 +692,7 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
                 }
                 continue;
             }
-            if (ptsMs - clockMs() > MAX_VIDEO_LEAD_MS && !audioCushionSufficient()) {
+            if (ptsMs - videoClockMs() > MAX_VIDEO_LEAD_MS && !audioCushionSufficient()) {
                 // Far ahead of the clock only because the sound is being fed its cushion: decode
                 // (VP9 needs every frame as a reference) but skip the conversion and the
                 // presentation. The picture drops these frames the same way it drops late frames
@@ -688,8 +720,22 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         if (width <= 0 || height <= 0) {
             return;
         }
-        if (format != this.swsFormat || width != this.swsWidth || height != this.swsHeight) {
-            recreateScaler(format, width, height);
+        // A source larger than the window is converted (and later uploaded) at window size: the
+        // scaler scales in the same pass that would run anyway, and a 4K clip on a smaller screen
+        // then costs a fraction of the pixels to convert, copy and upload - the aspect ratio is
+        // preserved, so every fit mode keeps working unchanged.
+        int outWidth = width;
+        int outHeight = height;
+        int windowWidth = this.sink.outputWidth();
+        int windowHeight = this.sink.outputHeight();
+        if (windowWidth > 0 && windowHeight > 0 && (width > windowWidth || height > windowHeight)) {
+            double scale = Math.min(windowWidth / (double) width, windowHeight / (double) height);
+            outWidth = Math.max(2, (int) Math.floor(width * scale / 2.0) * 2);
+            outHeight = Math.max(2, (int) Math.floor(height * scale / 2.0) * 2);
+        }
+        if (format != this.swsFormat || width != this.swsWidth || height != this.swsHeight
+                || outWidth != this.swsOutWidth || outHeight != this.swsOutHeight) {
+            recreateScaler(format, width, height, outWidth, outHeight);
             if (this.swsContext == null) {
                 return;
             }
@@ -697,38 +743,42 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         // The conversion writes straight into the sink's staging buffer: no intermediate frame
         // copy on the producer side, which is what keeps the decode thread comfortably inside the
         // frame budget at 4K.
-        ByteBuffer target = this.sink.beginFrame(width, height);
+        ByteBuffer target = this.sink.beginFrame(outWidth, outHeight);
         if (target == null) {
             return;
         }
         target.clear();
         avutil.av_image_fill_arrays(this.rgbaFrame.data(), this.rgbaFrame.linesize(),
-                new BytePointer(target), avutil.AV_PIX_FMT_RGBA, width, height, 1);
+                new BytePointer(target), avutil.AV_PIX_FMT_RGBA, outWidth, outHeight, 1);
         swscale.sws_scale(this.swsContext, src.data(), src.linesize(),
                 0, height, this.rgbaFrame.data(), this.rgbaFrame.linesize());
-        this.sink.processAlpha(target, width * height);
-        this.sink.commitFrame(width, height);
+        this.sink.processAlpha(target, outWidth * outHeight);
+        this.sink.commitFrame(outWidth, outHeight);
         this.firstFrameSeen = true;
         this.presentedFrames++;
     }
 
     /** Builds (or rebuilds) the YUV(A)/NV12 -> RGBA conversion for a new frame size/format. */
-    private void recreateScaler(int format, int width, int height) {
+    private void recreateScaler(int format, int srcWidth, int srcHeight, int dstWidth, int dstHeight) {
         releaseScaler();
-        this.swsContext = swscale.sws_getContext(width, height, format, width, height,
+        // Bilinear is exact for the 1:1 case (no scaling), so one flag covers both paths.
+        this.swsContext = swscale.sws_getContext(srcWidth, srcHeight, format, dstWidth, dstHeight,
                 avutil.AV_PIX_FMT_RGBA, swscale.SWS_BILINEAR, null, null, (DoublePointer) null);
         if (this.swsContext == null) {
             LOGGER.warn("Could not create a scaler for {} (format {})", this.file, format);
             return;
         }
         this.swsFormat = format;
-        this.swsWidth = width;
-        this.swsHeight = height;
+        this.swsWidth = srcWidth;
+        this.swsHeight = srcHeight;
+        this.swsOutWidth = dstWidth;
+        this.swsOutHeight = dstHeight;
         // The destination frame is a pointer carrier: av_image_fill_arrays re-points its data at
         // the sink's staging buffer for every frame.
         this.rgbaFrame = avutil.av_frame_alloc();
         if (this.debug) {
-            LOGGER.info("Scaling {}x{} (format {}) to RGBA for {}", width, height, format, this.file);
+            LOGGER.info("Scaling {}x{} (format {}) to {}x{} RGBA for {}",
+                    srcWidth, srcHeight, format, dstWidth, dstHeight, this.file);
         }
     }
 
@@ -744,6 +794,8 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         this.swsFormat = -1;
         this.swsWidth = -1;
         this.swsHeight = -1;
+        this.swsOutWidth = -1;
+        this.swsOutHeight = -1;
     }
 
     /** Pushes the decoders' remaining frames out at the end of the file. */
@@ -968,6 +1020,11 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
             this.audioAnchorPtsMs = chunkPtsMs;
             this.audioAnchorWrittenBytes = this.audioWrittenBytes;
             this.audioMediaUsFloor = mediaUs;
+            // The stale-clock extrapolation may have run the clock ahead of the device while the
+            // sound was re-priming after a seek or a pause. This anchor is the device's own word
+            // for where playback is, so the floor (the "never step backwards" guard) starts over
+            // here too - otherwise the guessed-ahead value stays glued for the rest of the video.
+            this.clockFloorMs = Long.MIN_VALUE;
         }
         // The device's position is derived from buffer availability and can be briefly wrong
         // around underruns and sound-server round trips. Real playback never runs backwards and
@@ -1004,8 +1061,11 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         }
         this.lastAvSyncLogNanos = now;
         if (this.audioClockValid && this.lastVideoPtsMs >= 0L) {
-            LOGGER.info("A/V sync: picture {} ms, audible sound {} ms (picture leads by {} ms)",
-                    this.lastVideoPtsMs, this.audioClockMs, this.lastVideoPtsMs - this.audioClockMs);
+            LOGGER.info("A/V sync: picture {} ms, audible sound {} ms (picture leads by {} ms){}",
+                    this.lastVideoPtsMs, this.audioClockMs, this.lastVideoPtsMs - this.audioClockMs,
+                    this.audioLatencyMs != 0
+                            ? " - " + this.audioLatencyMs + " ms output latency compensation"
+                            : "");
         }
     }
 
@@ -1058,6 +1118,18 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
      * glued. Either way the clock is monotonic between seeks and can never stall with a wedged
      * output - a misbehaving sound degrades the sound, never the scene.
      */
+    /**
+     * The clock the picture is paced against: the playback clock minus the configured output
+     * latency compensation. {@link #audioLatencyMs} shifts the picture later by that amount -
+     * the compensation for an output whose latency the program cannot measure, where the position
+     * the sound pipeline reports runs ahead of what is actually audible (a Bluetooth chain
+     * buffers far more audio than its device position admits, so the picture paced against the
+     * reported position visibly leads the sound that reaches the ears).
+     */
+    private long videoClockMs() {
+        return clockMs() - this.audioLatencyMs;
+    }
+
     private long clockMs() {
         long value;
         if (this.useAudioClock && this.audioClockValid) {
@@ -1204,6 +1276,11 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     @Override
     public void setHardwareDecoding(boolean hardwareDecoding) {
         this.hardwareDecoding = hardwareDecoding;
+    }
+
+    @Override
+    public void setAudioLatencyMs(int latencyMs) {
+        this.audioLatencyMs = latencyMs;
     }
 
     @Override

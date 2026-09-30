@@ -115,6 +115,16 @@ public interface VideoPlayer {
     default void setHardwareDecoding(boolean hardwareDecoding) {
     }
 
+    /**
+     * Delays the picture by the given milliseconds relative to the sound pipeline's reported
+     * position - compensation for an output whose latency the program cannot measure. Bluetooth
+     * headphones are the common case: the audio chain buffers far more sound than the device
+     * position reports, so without compensation the picture runs ahead of what is actually
+     * audible. Zero keeps the picture on the reported position.
+     */
+    default void setAudioLatencyMs(int latencyMs) {
+    }
+
     /** Enables verbose backend logging (used by the "debug logging" config option). */
     default void setDebugLogging(boolean debug) {
     }

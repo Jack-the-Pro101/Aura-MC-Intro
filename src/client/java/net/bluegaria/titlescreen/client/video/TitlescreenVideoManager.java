@@ -555,6 +555,7 @@ public final class TitlescreenVideoManager {
         Thread thread = new Thread(() -> {
             this.backgroundPlayer.setDebugLogging(cfg.general.debugLogging);
             this.backgroundPlayer.setHardwareDecoding(cfg.video.hardwareDecoding);
+            this.backgroundPlayer.setAudioLatencyMs(cfg.video.audioLatencyMs);
             this.backgroundPlayer.setAudioDevice(cfg.video.videoAudioDevice);
             // Volume 0: the preload decodes the first frame while the game is still starting up, and
             // playing the audio there would be heard long before anything is on screen.
@@ -650,6 +651,7 @@ public final class TitlescreenVideoManager {
         Thread thread = new Thread(() -> {
             this.backgroundPlayer.setDebugLogging(cfg.general.debugLogging);
             this.backgroundPlayer.setHardwareDecoding(cfg.video.hardwareDecoding);
+            this.backgroundPlayer.setAudioLatencyMs(cfg.video.audioLatencyMs);
             this.backgroundPlayer.setAudioDevice(cfg.video.videoAudioDevice);
             boolean ok = this.backgroundPlayer.start(path, loadingVolume(cfg));
             if (ok && usesSeparateAudioPlayer(cfg)) {
@@ -920,6 +922,7 @@ public final class TitlescreenVideoManager {
         Thread thread = new Thread(() -> {
             this.player.setDebugLogging(cfg.general.debugLogging);
             this.player.setHardwareDecoding(cfg.video.hardwareDecoding);
+            this.player.setAudioLatencyMs(cfg.video.audioLatencyMs);
             this.player.setAudioDevice(cfg.video.videoAudioDevice);
             boolean ok = this.player.start(path, cfg.video.videoVolume);
             if (usesSeparateAudioPlayer(cfg)) {
