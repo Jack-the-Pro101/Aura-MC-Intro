@@ -64,6 +64,11 @@ case "$PLATFORM" in
       # The plain pkg-config must not see the host's amd64 libva.pc; overridable for other
       # distro layouts.
       export PKG_CONFIG_LIBDIR="${PKG_CONFIG_LIBDIR:-/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig:/usr/lib/pkgconfig}"
+      # configure prepends the cross prefix to its pkg-config default, yielding
+      # aarch64-linux-gnu-pkg-config - a binary that does not exist, which silently kills
+      # every pkg-config probe (and then --enable-vaapi dies with "requested but not
+      # found"). Force the plain binary, steered by the PKG_CONFIG_LIBDIR above.
+      CROSS+=(--pkg-config=pkg-config)
       HWACCEL=(--enable-vaapi --enable-hwaccel=vp9_vaapi)
     else
       HWACCEL=()
