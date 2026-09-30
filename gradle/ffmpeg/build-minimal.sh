@@ -54,7 +54,8 @@ case "$PLATFORM" in
     # VAAPI like on x86_64: VAAPI (and CUDA, which has no ARM SBC counterpart) is what the player
     # tries on Linux, and Mesa ships VAAPI drivers for the SoCs that can run the game (RK3588 &
     # friends). Unlike NVDEC, VAAPI is a link-time dependency, so the build needs the arm64
-    # libva: `sudo dpkg --add-architecture arm64 && sudo apt-get install libva-dev:arm64`, with
+    # libva: libva-dev:arm64 through multiarch (the workflow's Install toolchain step shows the
+    # full setup - arm64 packages come from ports.ubuntu.com, not the amd64 archives), with
     # pkg-config pointed at the arm64 .pc files (done below). The kernel V4L2 m2m decoders are
     # no alternative here: the player opens the plain vp9 decoder, and v4l2m2m is a separate
     # decoder it would never pick. Set FFMPEG_NO_HWACCEL=1 for a software-only build without

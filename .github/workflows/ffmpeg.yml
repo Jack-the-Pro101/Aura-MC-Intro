@@ -53,9 +53,29 @@ jobs:
           if [ "$RUNNER_OS" = "macOS" ]; then
             if [ -n "${{ matrix.packages }}" ]; then brew install ${{ matrix.packages }}; fi
           else
-            # Foreign-arch packages (linux-arm64's libva-dev:arm64) need the architecture
-            # registered before the update pulls in its package indexes.
-            case "${{ matrix.packages }}" in *:arm64*) sudo dpkg --add-architecture arm64;; esac
+            # Foreign-arch packages (linux-arm64's libva-dev:arm64) need more than registering
+            # the architecture: the amd64 archives carry no binary-arm64 indexes, so apt-get
+            # update 404s and aborts. Restrict the built-in deb822 sources to the native arch
+            # and add an arm64-only stanza for the ports archive, where the arm64 packages
+            # (and their dependencies) actually live.
+            case "${{ matrix.packages }}" in *:arm64*)
+              sudo dpkg --add-architecture arm64
+              for sources in /etc/apt/sources.list.d/*.sources; do
+                [ -f "$sources" ] || continue
+                if ! grep -q '^Architectures:' "$sources"; then
+                  sudo sed -i 's/^Suites:/Architectures: amd64\nSuites:/' "$sources"
+                fi
+              done
+              suite=$(. /etc/os-release && echo "$VERSION_CODENAME")
+              printf '%s\n' \
+                'Types: deb' \
+                'URIs: http://ports.ubuntu.com/ubuntu-ports' \
+                "Suites: $suite $suite-updates $suite-backports $suite-security" \
+                'Components: main restricted universe multiverse' \
+                'Architectures: arm64' \
+                'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+                | sudo tee /etc/apt/sources.list.d/arm64-ports.sources >/dev/null
+            ;; esac
             sudo apt-get update
             sudo apt-get install -y nasm ${{ matrix.packages }}
           fi
