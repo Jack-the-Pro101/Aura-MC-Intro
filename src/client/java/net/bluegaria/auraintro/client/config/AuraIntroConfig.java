@@ -228,7 +228,7 @@ public class AuraIntroConfig implements ConfigData {
         /** Video timestamp at which the title screen buttons start fading in. */
         @ConfigEntry.Gui.Tooltip
         @ConfigEntry.BoundedDiscrete(min = 0, max = 60000)
-        public int buttonsFadeInAtMs = 2000;
+        public int buttonsFadeInAtMs = 2150;
 
         /** How long the buttons take to fade in, in milliseconds. 0 makes them appear instantly. */
         @ConfigEntry.Gui.Tooltip
@@ -241,7 +241,7 @@ public class AuraIntroConfig implements ConfigData {
          */
         @ConfigEntry.Gui.Tooltip
         @ConfigEntry.BoundedDiscrete(min = 0, max = 60000)
-        public int textFadeInAtMs = 2700;
+        public int textFadeInAtMs = 2800;
 
         /** How long those texts take to fade in, in milliseconds. 0 makes them appear instantly. */
         @ConfigEntry.Gui.Tooltip
