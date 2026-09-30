@@ -6,7 +6,7 @@
 // Version-specific values live in versions/<mc>/gradle.properties, shared values in
 // the root gradle.properties. sc.current.version is the current node's MC version.
 
-// Mod version is suffixed with the Minecraft version, e.g. Titlescreen-1.0-SNAPSHOT+26.2.jar
+// Mod version is suffixed with the Minecraft version, e.g. Aura-Intro-1.0-SNAPSHOT+26.2.jar
 version = "${project.mod_version}+${sc.current.version}"
 group = project.maven_group
 
@@ -18,7 +18,7 @@ loom {
     splitEnvironmentSourceSets()
 
     mods {
-        "titlescreen" {
+        "aura-intro" {
             sourceSet sourceSets.main
             sourceSet sourceSets.client
         }
@@ -264,7 +264,7 @@ dependencies {
         // The Java binding layer (javacpp) plus the FFmpeg API classes.
         include "org.bytedeco:javacpp:${project.javacpp_version}"
         include "org.bytedeco:ffmpeg:${project.ffmpeg_version}"
-        // JNA remains for the libc setenv() call in TitlescreenClient (OpenAL inside sandboxes).
+        // JNA remains for the libc setenv() call in AuraIntroClient (OpenAL inside sandboxes).
         include "net.java.dev.jna:jna:${project.jna_version}"
         // The prebuilt libraries, trimmed (see the trimFfmpegNatives tasks above) and nested
         // from the build-local repository.
@@ -291,7 +291,7 @@ tasks.withType(ProcessResources).configureEach {
     inputs.properties(expandProps)
     filteringCharset "UTF-8"
 
-    filesMatching(["fabric.mod.json", "titlescreen.client.mixins.json", "titlescreen.versioned.mixins.json"]) {
+    filesMatching(["fabric.mod.json", "aura-intro.client.mixins.json", "aura-intro.versioned.mixins.json"]) {
         expand expandProps
     }
 }

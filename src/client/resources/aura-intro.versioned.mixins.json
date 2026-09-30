@@ -1,0 +1,15 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "net.bluegaria.auraintro.mixin.client",
+  "compatibilityLevel": "${mixin_compat}",
+  "client": [
+    ${versioned_mixins}
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  },
+  "overwrites": {
+    "requireAnnotations": true
+  }
+}

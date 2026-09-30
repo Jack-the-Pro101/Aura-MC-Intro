@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "id": "titlescreen",
+  "id": "aura-intro",
   "version": "${version}",
-  "name": "Titlescreen",
+  "name": "Aura-Intro",
   "description": "Replaces the vanilla loading/title screen presentation with a configurable video intro. One baked clip can cover the whole start-up: it plays behind the loading bar, freezes on a chosen frame while the game finishes loading, then continues as the intro while the progress bar, the buttons and the title screen texts fade in on their own timestamps.",
   "authors": [
     "bluegaria"
@@ -10,25 +10,25 @@
   "contact": {},
   "license": "GPL-3.0-only",
   "environment": "client",
-  "icon": "assets/titlescreen/icon.png",
+  "icon": "assets/aura-intro/icon.png",
   "entrypoints": {
     "preLaunch": [
-      "net.bluegaria.titlescreen.client.TitlescreenPreLaunch"
+      "net.bluegaria.auraintro.client.AuraIntroPreLaunch"
     ],
     "client": [
-      "net.bluegaria.titlescreen.client.TitlescreenClient"
+      "net.bluegaria.auraintro.client.AuraIntroClient"
     ],
     "modmenu": [
-      "net.bluegaria.titlescreen.client.TitlescreenModMenu"
+      "net.bluegaria.auraintro.client.AuraIntroModMenu"
     ]
   },
   "mixins": [
     {
-      "config": "titlescreen.client.mixins.json",
+      "config": "aura-intro.client.mixins.json",
       "environment": "client"
     },
     {
-      "config": "titlescreen.versioned.mixins.json",
+      "config": "aura-intro.versioned.mixins.json",
       "environment": "client"
     }
   ],

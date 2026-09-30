@@ -1,4 +1,4 @@
-# Titlescreen
+# Aura-Intro
 
 Note: This whole thing is basically vibe coded. I am experimenting with AI stuff.
 
@@ -39,7 +39,7 @@ screen - Cloth Config is an external dependency and must be installed separately
    prebuilt builds from the [JavaCPP presets](https://github.com/bytedeco/javacpp-presets):
    `libavformat`, `libavcodec`, `libavutil`, `libswscale`, `libswresample` - trimmed to what VP9
    playback needs, for Windows/Linux/macOS on x86-64 and ARM64). On first use they are extracted once
-   into `config/titlescreen/javacpp-cache/` and reused from there on every launch. No VLC or FFmpeg
+   into `config/aura-intro/javacpp-cache/` and reused from there on every launch. No VLC or FFmpeg
    installation is required, and sandboxed launchers (Flatpak/Snap) work without exposing anything of
    the host OS. Bundling every platform makes the mod jar large (~120 MB) - that is the price of "put
    the jar in the mods folder and it works".
@@ -56,11 +56,11 @@ screen - Cloth Config is an external dependency and must be installed separately
    is missing, Java Sound takes over with a deliberate device choice (sound-server-backed devices
    before raw hardware, which never follow the default-output setting).
 
-3. A video file, by default `config/titlescreen/intro.webm` inside your game directory.
+3. A video file, by default `config/aura-intro/intro.webm` inside your game directory.
    **You don't have to provide one**: the mod ships its video inside the jar and plays that whenever the
    configured path is empty or has no file at it - so it works out of the box, and dropping your own clip at
    that path overrides the bundled one (`useBundledDefaultVideo` in the config turns the fallback off).
-   The bundled clip is unpacked next to the config (`config/titlescreen/bundled/`) because the decoder
+   The bundled clip is unpacked next to the config (`config/aura-intro/bundled/`) because the decoder
    opens files by real path.
 
 ## Recommended video format
@@ -148,7 +148,7 @@ cut).
 
 ## Configuration
 
-The config lives in `config/titlescreen.json` and is editable in-game via the Cloth Config screen
+The config lives in `config/aura-intro.json` and is editable in-game via the Cloth Config screen
 (Mod Menu integration).
 
 **Every timing is relative to the scene it belongs to**, so the two videos can be tuned independently:
@@ -179,7 +179,7 @@ from the anchor is used after a few seconds so the loading screen still clears.
 
 | Option              | Default                         | Description                                                                                                                                                                                                                                                                                        |
 | ------------------- | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `videoPath`         | `config/titlescreen/intro.webm` | Video file, relative to the game directory.                                                                                                                                                                                                                                                        |
+| `videoPath`         | `config/aura-intro/intro.webm` | Video file, relative to the game directory.                                                                                                                                                                                                                                                        |
 | `videoVolume`       | `100`                           | Audio volume, 0-100.                                                                                                                                                                                                                                                                               |
 | `audioDelayMs`      | `0`                             | Shifts a baked video's sound relative to its picture in milliseconds. Positive plays the sound later. Only used when `audioInSamePlayer` is off - with one player for both streams they share a clock and need no delay. Tune by ear; a faster machine needs less, or a negative value.            |
 | `audioInSamePlayer` | `true`                          | Play the sound inside the video player: one clock, so no drift and no delay needed, and the decoder keeps the sound on time by dropping late video frames. Off = a separate audio-only player, which a slow video pipeline cannot starve; that player is also resynchronised to the picture automatically whenever it falls behind or runs ahead by more than a fraction of a second. |
@@ -221,8 +221,8 @@ from the anchor is used after a few seconds so the loading screen still clears.
 | Option                                     | Default                                      | Description                                                                                                                                                                                         |
 | ------------------------------------------ | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `loadingBackground.enabled`                | `true`                                       | Play a video behind the vanilla loading bar instead of the plain red background.                                                                                                                    |
-| `loadingBackground.videoPath`              | `config/titlescreen/loading_background.webm` | Loading background video. Only used when "reuse the intro video" is off.                                                                                                                            |
-| `loadingBackground.useBundledDefaultVideo` | `true`                                       | Play the loading clip bundled with the mod (`assets/titlescreen/video/mojang_studios.webm`) when the configured file is missing. Only used when "reuse the intro video" is off.                     |
+| `loadingBackground.videoPath`              | `config/aura-intro/loading_background.webm` | Loading background video. Only used when "reuse the intro video" is off.                                                                                                                            |
+| `loadingBackground.useBundledDefaultVideo` | `true`                                       | Play the loading clip bundled with the mod (`assets/aura-intro/video/mojang_studios.webm`) when the configured file is missing. Only used when "reuse the intro video" is off.                     |
 | `loadingBackground.volume`                 | `0`                                          | Audio volume (muted by default). Only used when "reuse the intro video" is off — with a baked video the loading scene plays part of the intro, so the intro's own volume applies to the whole clip. |
 | `loadingBackground.opacity`                | `100`                                        | Opacity multiplier.                                                                                                                                                                                 |
 | `loadingBackground.fit`                    | `COVER`                                      | `COVER`, `CONTAIN` or `STRETCH`.                                                                                                                                                                    |
@@ -361,7 +361,7 @@ properties in `versions/<mc>/gradle.properties`).
 ./gradlew :1.21.10:build :1.21.11:build :26.1:build :26.2:build :26.3:build
 ```
 
-Each build lands in `versions/<mc>/build/libs/` as `Titlescreen-<mod version>+<mc>.jar`. The 1.21.x
+Each build lands in `versions/<mc>/build/libs/` as `Aura-Intro-<mod version>+<mc>.jar`. The 1.21.x
 builds are remapped to intermediary names (classic Fabric tooling, `fabric-loom-remap`), while the 26.x
 builds compile directly against the unobfuscated jars (loom's non-obfuscated mode). Version-specific
 API differences are handled with Stonecutter comment conditions (`//? if ...`) and name swaps in
