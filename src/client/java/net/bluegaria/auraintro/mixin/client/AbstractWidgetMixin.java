@@ -17,11 +17,15 @@ public abstract class AbstractWidgetMixin {
 
     @WrapMethod(method = "isMouseOver(DD)Z")
     private boolean auraintro$scaledHitTest(double mouseX, double mouseY, Operation<Boolean> original) {
-        float scale = AuraIntroVideoManager.get().buttonGuiScaleFor(McCompat.currentScreen(Minecraft.getInstance()));
-        if (scale <= 0.0F || scale == 1.0F) {
+        Minecraft minecraft = Minecraft.getInstance();
+        float factor = AuraIntroVideoManager.get()
+                .buttonScaleFactorFor(McCompat.currentScreen(minecraft));
+        if (factor <= 0.0F || factor == 1.0F) {
             return original.call(mouseX, mouseY);
         }
-        double[] transformed = AuraIntroVideoManager.toButtonSpace(mouseX, mouseY, scale);
+        double[] transformed = AuraIntroVideoManager.mouseToButtonSpace((AbstractWidget) (Object) this,
+                mouseX, mouseY, factor,
+                minecraft.getWindow().getGuiScaledWidth(), minecraft.getWindow().getGuiScaledHeight());
         return original.call(transformed[0], transformed[1]);
     }
 }

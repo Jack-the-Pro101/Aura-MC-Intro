@@ -14,6 +14,10 @@ import org.spongepowered.asm.mixin.injection.At;
 /**
  * Applies the separate "buttons GUI scale" to the title screen widgets only, without touching
  * the rest of the UI (or the vanilla GUI scale option).
+ *
+ * <p>Each widget is transformed with vanilla's own title screen anchors (see
+ * {@link AuraIntroVideoManager#pushButtonScale}), so the result matches what the game itself
+ * draws at that GUI scale - same sizes, same positions, text included.</p>
  */
 @Mixin(Screen.class)
 public abstract class ScreenMixin {
@@ -24,20 +28,19 @@ public abstract class ScreenMixin {
                     target = "Lnet/minecraft/client/gui/components/Renderable;extractRenderState(Lnet/minecraft/client/gui/GuiGraphicsExtractor;IIF)V"))
     private void auraintro$scaledButtons(Renderable renderable, GuiGraphicsExtractor graphics, int mouseX,
                                            int mouseY, float partialTick, Operation<Void> original) {
-        float scale = AuraIntroVideoManager.get().buttonGuiScaleFor((Screen) (Object) this);
-        if (scale <= 0.0F || scale == 1.0F || !(renderable instanceof AbstractWidget)) {
+        float factor = AuraIntroVideoManager.get().buttonScaleFactorFor((Screen) (Object) this);
+        if (factor <= 0.0F || factor == 1.0F || !(renderable instanceof AbstractWidget widget)) {
             original.call(renderable, graphics, mouseX, mouseY, partialTick);
             return;
         }
 
-        double[] scaledMouse = AuraIntroVideoManager.toButtonSpace(mouseX, mouseY, scale);
-        float centerX = graphics.guiWidth() / 2.0F;
-        float centerY = graphics.guiHeight() / 2.0F;
+        int guiWidth = graphics.guiWidth();
+        int guiHeight = graphics.guiHeight();
+        double[] scaledMouse = AuraIntroVideoManager.mouseToButtonSpace(
+                widget, mouseX, mouseY, factor, guiWidth, guiHeight);
         Matrix3x2fStack pose = graphics.pose();
         pose.pushMatrix();
-        pose.translate(centerX, centerY);
-        pose.scale(scale, scale);
-        pose.translate(-centerX, -centerY);
+        AuraIntroVideoManager.pushButtonScale(pose, widget, factor, guiWidth, guiHeight);
         try {
             original.call(renderable, graphics, (int) Math.round(scaledMouse[0]),
                     (int) Math.round(scaledMouse[1]), partialTick);

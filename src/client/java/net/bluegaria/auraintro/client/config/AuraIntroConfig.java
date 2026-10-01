@@ -87,9 +87,9 @@ public class AuraIntroConfig implements ConfigData {
         public boolean suppressMenuMusic = true;
 
         /**
-         * Replays the intro every time the resource loading splash appears again (for example
-         * after F3+T or when changing resource packs). Disabled by default so the intro only
-         * plays once at startup.
+         * Replays the whole video intro (loading screen included) every time the resource loading
+         * splash appears again (for example after F3+T or when changing resource packs). Disabled
+         * by default so the intro only plays once at startup.
          */
         @ConfigEntry.Gui.Tooltip
         public boolean replayOnResourceReload = false;
@@ -187,9 +187,10 @@ public class AuraIntroConfig implements ConfigData {
         public int videoStartDelayMs = 0;
 
         /**
-         * How long the video takes to fade in once it starts, in milliseconds. Only used when the loading
-         * screen does <em>not</em> reuse the intro video (a baked video is already on screen and just keeps
-         * playing, so fading it in again would blink the loading screen through).
+         * How long the video takes to fade in once it starts, in milliseconds. Only used when the
+         * loading screen does <em>not</em> show the video (with the video already on screen behind
+         * the loading bar it just keeps playing, so fading it in again would blink the loading
+         * screen through).
          */
         @ConfigEntry.Gui.Tooltip
         @ConfigEntry.BoundedDiscrete(min = 0, max = 20000)
@@ -281,11 +282,15 @@ public class AuraIntroConfig implements ConfigData {
         public int buttonsYOffset = 0;
 
         /**
-         * GUI scale applied only to the title screen buttons, independent of the vanilla GUI
-         * scale. Use -1 (default) to follow the regular GUI scale.
+         * GUI scale applied only to the title screen buttons, independent of the game's own GUI
+         * scale - with exactly vanilla's semantics: an integer scale that is clamped to what the
+         * window supports, just like the game's "GUI Scale" option. -1 (default) follows the
+         * regular GUI scale, 0 means "Auto" (the largest scale the window supports) and 1-4 are
+         * fixed scales.
          */
         @ConfigEntry.Gui.Tooltip
-        public float buttonsGuiScale = -1.0F;
+        @ConfigEntry.BoundedDiscrete(min = -1, max = 4)
+        public int buttonsGuiScale = -1;
 
         /**
          * When enabled, the vanilla 2 second button fade-in is left untouched and the
@@ -296,62 +301,27 @@ public class AuraIntroConfig implements ConfigData {
     }
 
     /**
-     * A second video that is drawn as the background of the vanilla "MOJANG STUDIOS" loading screen
-     * (behind the loading bar). By default it holds its last frame once it ends, so it works as a
-     * static background for the whole loading phase. The Minecraft Dungeons loading screen loop is
-     * a good fit for this.
+     * How the (single) intro video is used behind the vanilla "MOJANG STUDIOS" loading screen
+     * (behind the loading bar): it is drawn there from the moment the window appears, freezes on
+     * the {@link #holdAtMs} frame while the game finishes loading and then continues into the
+     * intro - one player, one decoder, no hand-over.
      */
     public static class LoadingBackground {
+        /**
+         * Draw the intro video behind the vanilla loading bar instead of the plain red background.
+         * When off, the loading screen stays vanilla and the video intro only starts (and fades in)
+         * once loading has finished.
+         */
         @ConfigEntry.Gui.Tooltip
         public boolean enabled = true;
-
-        /**
-         * Path to the loading background video, relative to the game directory (or absolute). When a file
-         * is there it is used; otherwise the loading clip bundled with the mod plays.
-         *
-         * <p>Only used when "reuse the intro video" below is off: with one baked video the loading scene
-         * plays the beginning of that same file.</p>
-         */
-        @ConfigEntry.Gui.Tooltip
-        public String videoPath = "config/aura-intro/loading_background.webm";
-
-        /**
-         * Play the loading screen clip bundled with the mod when the configured file is not there. Only used
-         * when "reuse the intro video" below is off.
-         */
-        @ConfigEntry.Gui.Tooltip
-        public boolean useBundledDefaultVideo = true;
-
-        /**
-         * Volume for this video, 0-100. Only used when "reuse the intro video" below is off: with a baked
-         * video the loading scene plays part of the intro, so the intro's volume applies to the whole clip.
-         */
-        @ConfigEntry.Gui.Tooltip
-        @ConfigEntry.BoundedDiscrete(min = 0, max = 100)
-        public int volume = 0;
-
-        /** Extra opacity multiplier on top of the video's alpha, 0-100. */
-        @ConfigEntry.Gui.Tooltip
-        @ConfigEntry.BoundedDiscrete(min = 0, max = 100)
-        public int opacity = 100;
-
-        @ConfigEntry.Gui.Tooltip
-        @ConfigEntry.Gui.EnumHandler(option = ConfigEntry.Gui.EnumHandler.EnumDisplayOption.BUTTON)
-        public VideoFit fit = VideoFit.COVER;
 
         /** Fade-in duration once the loading screen appears, in milliseconds. */
         @ConfigEntry.Gui.Tooltip
         @ConfigEntry.BoundedDiscrete(min = 0, max = 20000)
         public int fadeInMs = 500;
 
-        /** Upper bound for texture uploads per second while the loading screen is up. 0 = unlimited. */
-        @ConfigEntry.Gui.Tooltip
-        @ConfigEntry.BoundedDiscrete(min = 0, max = 240)
-        public int maxFps = 30;
-
-
         /**
-         * Hide the vanilla "MOJANG STUDIOS" logo while the background video is showing, so the
+         * Hide the vanilla "MOJANG STUDIOS" logo while the video is showing, so the
          * loading bar sits directly on top of the video.
          */
         @ConfigEntry.Gui.Tooltip
@@ -365,8 +335,8 @@ public class AuraIntroConfig implements ConfigData {
         public boolean loop = false;
 
         /**
-         * When enabled the loading screen is kept up until the background video has played to the
-         * end, so the next scene (the intro video / title screen) never starts mid-clip.
+         * When enabled the loading screen is kept up until the video has played to the
+         * end, so the next scene (the intro / title screen) never starts mid-clip.
          */
         @ConfigEntry.Gui.Tooltip
         public boolean waitForVideoToFinish = true;
@@ -379,23 +349,10 @@ public class AuraIntroConfig implements ConfigData {
         @ConfigEntry.BoundedDiscrete(min = 0, max = 600000)
         public int maxWaitForVideoMs = 30000;
 
-        /** Replay the loading background on resource reload splashes (F3+T, resource packs). */
-        @ConfigEntry.Gui.Tooltip
-        public boolean replayOnResourceReload = true;
-
         /**
-         * Use the intro video for the loading screen too: one file that contains both scenes, the
-         * Mojang/loading part first and the intro after it. This is the recommended setup and the default;
-         * it means one player, one decoder and no hand-over at all. Turn it off to use the separate file
-         * above for the loading screen.
-         */
-        @ConfigEntry.Gui.Tooltip
-        public boolean useIntroVideo = true;
-
-        /**
-         * Timestamp (ms) in the baked video at which the loading screen freezes on a frame and waits for
-         * the game to finish loading; the intro then continues from exactly that frame. 0 plays the whole
-         * clip during loading instead.
+         * Timestamp (ms) in the video at which the loading screen freezes on a frame and waits for
+         * the game to finish loading; the intro then continues from exactly that frame. 0 plays the
+         * clip through during loading instead.
          */
         @ConfigEntry.Gui.Tooltip
         @ConfigEntry.BoundedDiscrete(min = 0, max = 600000)
@@ -406,29 +363,11 @@ public class AuraIntroConfig implements ConfigData {
     // Helpers used by the runtime
     // ------------------------------------------------------------------
 
+    /**
+     * Path of the video: the configured file, resolved against the game directory (or absolute).
+     */
     public Path resolveVideoPath() {
         String configured = this.video.videoPath == null ? "" : this.video.videoPath.trim();
-        if (configured.isEmpty()) {
-            return null;
-        }
-        Path path = Path.of(configured);
-        if (!path.isAbsolute()) {
-            path = FabricLoader.getInstance().getGameDir().resolve(path);
-        }
-        return path.normalize();
-    }
-
-    /**
-     * Path of the loading scene's video: the intro video when it is baked into the loading scene (the
-     * default), otherwise the separate loading background file.
-     */
-    public Path resolveLoadingBackgroundPath() {
-        if (this.loadingBackground.enabled && this.loadingBackground.useIntroVideo) {
-            // Single baked video: the loading scene shows the beginning of the intro video.
-            return resolveVideoPath();
-        }
-        String configured = this.loadingBackground.videoPath == null
-                ? "" : this.loadingBackground.videoPath.trim();
         if (configured.isEmpty()) {
             return null;
         }
@@ -445,14 +384,6 @@ public class AuraIntroConfig implements ConfigData {
 
     public boolean overrideButtonFade() {
         return this.general.enabled && !this.layout.useVanillaButtonFade;
-    }
-
-    public float buttonsGuiScaleOrDefault(float vanillaScale) {
-        float configured = this.layout.buttonsGuiScale;
-        if (configured <= 0.0F) {
-            return vanillaScale;
-        }
-        return Math.max(0.1F, configured);
     }
 
     @Override
@@ -507,18 +438,11 @@ public class AuraIntroConfig implements ConfigData {
         }
 
         this.layout.buttonsYOffset = clamp(this.layout.buttonsYOffset, -400, 400);
-        if (this.layout.buttonsGuiScale != -1.0F) {
-            this.layout.buttonsGuiScale = Math.max(0.1F, this.layout.buttonsGuiScale);
-        }
+        this.layout.buttonsGuiScale = clamp(this.layout.buttonsGuiScale, -1, 4);
 
-        if (this.loadingBackground.fit == null) {
-            this.loadingBackground.fit = VideoFit.COVER;
-        }
-        this.loadingBackground.volume = clamp(this.loadingBackground.volume, 0, 100);
-        this.loadingBackground.opacity = clamp(this.loadingBackground.opacity, 0, 100);
-        this.loadingBackground.maxFps = clamp(this.loadingBackground.maxFps, 0, 240);
-        this.loadingBackground.maxWaitForVideoMs = clamp(this.loadingBackground.maxWaitForVideoMs, 0, 600000);
         this.loadingBackground.fadeInMs = Math.max(0, this.loadingBackground.fadeInMs);
+        this.loadingBackground.holdAtMs = Math.max(0, this.loadingBackground.holdAtMs);
+        this.loadingBackground.maxWaitForVideoMs = clamp(this.loadingBackground.maxWaitForVideoMs, 0, 600000);
     }
 
     private static int clamp(int value, int min, int max) {

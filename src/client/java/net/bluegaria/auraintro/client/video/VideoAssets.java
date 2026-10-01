@@ -23,8 +23,7 @@ public final class VideoAssets {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("Aura-Intro/Video");
 
-    private static final String BUNDLED_INTRO = "/assets/aura-intro/video/default_intro.webm";
-    private static final String BUNDLED_LOADING_BACKGROUND = "/assets/aura-intro/video/mojang_studios.webm";
+    private static final String BUNDLED_VIDEO = "/assets/aura-intro/video/default_intro.webm";
 
     /**
      * Where a bundled clip is unpacked for the decoder, which opens files by real path - not something inside
@@ -36,26 +35,14 @@ public final class VideoAssets {
     }
 
     /**
-     * The intro video: the configured file when it exists, the bundled clip otherwise.
+     * The one video of the mod: the configured file when it exists, the bundled clip otherwise.
+     * It serves both the loading screen background and the intro - one file, one player.
      *
      * @return the file to play, or {@code null} when neither is available
      */
-    public static Path resolveIntro(AuraIntroConfig cfg) {
+    public static Path resolveVideo(AuraIntroConfig cfg) {
         return resolve(cfg.resolveVideoPath(), cfg.video.videoPath,
-                cfg.general.useBundledDefaultVideo, BUNDLED_INTRO, "intro.webm");
-    }
-
-    /**
-     * The loading scene's video: with a baked video that is the intro's own clip, otherwise the separate
-     * loading background (configured file when it exists, bundled clip otherwise).
-     */
-    public static Path resolveLoadingBackground(AuraIntroConfig cfg) {
-        if (cfg.loadingBackground.enabled && cfg.loadingBackground.useIntroVideo) {
-            return resolveIntro(cfg);
-        }
-        return resolve(cfg.resolveLoadingBackgroundPath(), cfg.loadingBackground.videoPath,
-                cfg.loadingBackground.useBundledDefaultVideo, BUNDLED_LOADING_BACKGROUND,
-                "loading_background.webm");
+                cfg.general.useBundledDefaultVideo, BUNDLED_VIDEO, "intro.webm");
     }
 
     private static Path resolve(Path configured, String configuredName, boolean bundledAllowed,

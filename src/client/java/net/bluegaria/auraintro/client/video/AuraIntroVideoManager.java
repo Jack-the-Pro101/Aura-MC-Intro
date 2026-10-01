@@ -1,5 +1,6 @@
 package net.bluegaria.auraintro.client.video;
 
+import com.mojang.blaze3d.platform.Window;
 import net.bluegaria.auraintro.client.compat.McCompat;
 import net.bluegaria.auraintro.client.config.AuraIntroConfig;
 import net.bluegaria.auraintro.client.config.AuraIntroConfigHolder;
@@ -16,6 +17,7 @@ import net.minecraft.server.packs.resources.ReloadInstance;
 import net.minecraft.util.ARGB;
 import net.minecraft.util.Mth;
 import net.minecraft.util.Util;
+import org.joml.Matrix3x2fStack;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -28,11 +30,10 @@ import java.util.Optional;
  * Drives the whole video intro: the loading scene's background, the hand-over to the title screen, the
  * button and progress-bar timing and what happens when the video ends.
  *
- * <p>There are two scenes and, per scene, one video layer. The loading scene draws its video behind the
- * loading bar and freezes on a frame until the game has finished loading; the title screen then continues
- * from exactly that frame. With a single baked video ({@code loadingBackground.useIntroVideo}) one player
- * and one texture serve both scenes, so the hand-over costs nothing: no second player, no second decoder,
- * no seek, no stutter.</p>
+ * <p>There are two scenes and one video that runs through both. The loading scene draws the video
+ * behind the loading bar and freezes on a frame until the game has finished loading; the title
+ * screen then continues from exactly that frame. One player and one texture serve both scenes, so
+ * the hand-over costs nothing: no second player, no second decoder, no seek, no stutter.</p>
  *
  * <p>Everything here runs on the client/render thread (client tick events, mixin callbacks during
  * rendering) and never calls into the decoder: decoding happens on the backend's own threads, and
@@ -544,7 +545,7 @@ public final class AuraIntroVideoManager {
         if (!cfg.general.enabled || !cfg.loadingBackground.enabled || this.backgroundPlayedOnce) {
             return;
         }
-        Path path = VideoAssets.resolveLoadingBackground(cfg);
+        Path path = VideoAssets.resolveVideo(cfg);
         if (path == null) {
             return;
         }
@@ -614,10 +615,10 @@ public final class AuraIntroVideoManager {
             this.backgroundPlayer.resumeFromPreload();
             // The volume was forced to 0 for the silent preload - apply the configured one now that
             // the video is actually on screen.
-            this.backgroundPlayer.setVolume(loadingVolume(cfg));
+            this.backgroundPlayer.setVolume(cfg.video.videoVolume);
             if (usesSeparateAudioPlayer(cfg)) {
                 this.audioPlayer.resumeFromPreload();
-                this.audioPlayer.setVolume(loadingVolume(cfg));
+                this.audioPlayer.setVolume(cfg.video.videoVolume);
                 this.audioPlayer.setAudioDelayMs(cfg.video.audioDelayMs);
                 if (cfg.video.audioDelayMs != 0 && cfg.general.debugLogging) {
                     LOGGER.info("Shifting the sound by {} ms to line it up with the picture",
@@ -631,10 +632,10 @@ public final class AuraIntroVideoManager {
             this.loadingSyncReported = false;
             return;
         }
-        if (this.backgroundPlayedOnce && !cfg.loadingBackground.replayOnResourceReload) {
+        if (this.backgroundPlayedOnce && !cfg.general.replayOnResourceReload) {
             return;
         }
-        Path path = VideoAssets.resolveLoadingBackground(cfg);
+        Path path = VideoAssets.resolveVideo(cfg);
         if (path == null) {
             LOGGER.warn("No loading background video available - keeping the vanilla loading screen");
             this.backgroundFailed = true;
@@ -653,10 +654,10 @@ public final class AuraIntroVideoManager {
             this.backgroundPlayer.setHardwareDecoding(cfg.video.hardwareDecoding);
             this.backgroundPlayer.setAudioLatencyMs(cfg.video.audioLatencyMs);
             this.backgroundPlayer.setAudioDevice(cfg.video.videoAudioDevice);
-            boolean ok = this.backgroundPlayer.start(path, loadingVolume(cfg));
+            boolean ok = this.backgroundPlayer.start(path, cfg.video.videoVolume);
             if (ok && usesSeparateAudioPlayer(cfg)) {
                 this.audioPlayer.setAudioDevice(cfg.video.videoAudioDevice);
-                this.audioPlayer.start(path, loadingVolume(cfg));
+                this.audioPlayer.start(path, cfg.video.videoVolume);
             }
             if (this.backgroundGeneration != generation) {
                 this.backgroundPlayer.close();
@@ -773,7 +774,7 @@ public final class AuraIntroVideoManager {
         if (!this.backgroundActive && !hasFrame(player)) {
             return;
         }
-        if (this.backgroundTexture.upload(player, cfg.loadingBackground.maxFps)) {
+        if (this.backgroundTexture.upload(player, cfg.video.videoMaxFps)) {
             this.backgroundFramesUploaded++;
         }
 
@@ -783,12 +784,12 @@ public final class AuraIntroVideoManager {
         if (fadeIn > 0 && elapsed < fadeIn) {
             alpha = Math.max(0.0F, elapsed / (float) fadeIn);
         }
-        alpha *= cfg.loadingBackground.opacity / 100.0F;
+        alpha *= cfg.video.videoOpacity / 100.0F;
         if (alpha <= 0.004F) {
             return;
         }
         logFirstFrameOnScreen();
-        this.backgroundTexture.draw(graphics, player, cfg.loadingBackground.fit, alpha);
+        this.backgroundTexture.draw(graphics, player, cfg.video.videoFit, alpha);
     }
 
     private static boolean hasFrame(VideoPlayer player) {
@@ -906,14 +907,15 @@ public final class AuraIntroVideoManager {
 
     /** Starts the decoder on a background thread so the first real frame never blocks loading. */
     private boolean beginSession(AuraIntroConfig cfg) {
-        Path path = VideoAssets.resolveIntro(cfg);
+        Path path = VideoAssets.resolveVideo(cfg);
         if (path == null) {
             LOGGER.warn("No video available - skipping the video intro (vanilla behaviour is kept)");
             return false;
         }
         this.startRequested = true;
-        // Single baked video: the intro continues from the frame the loading screen held on.
-        long startAtMs = cfg.loadingBackground.useIntroVideo && cfg.loadingBackground.holdAtMs > 0
+        // One video for both scenes: when the loading screen held a freeze frame, the intro
+        // continues from that exact frame; otherwise it plays from the start.
+        long startAtMs = cfg.loadingBackground.holdAtMs > 0
                 ? cfg.loadingBackground.holdAtMs : 0L;
         if (startAtMs > 0L && cfg.general.debugLogging) {
             LOGGER.info("Video intro continues from {} ms of the baked video", startAtMs);
@@ -1012,9 +1014,9 @@ public final class AuraIntroVideoManager {
         }
     }
 
-    /** True when one baked video provides both the loading scene and the intro. */
+    /** True while one video serves both the loading scene and the intro (the only architecture). */
     private static boolean isBakedVideo(AuraIntroConfig cfg) {
-        return cfg.general.enabled && cfg.loadingBackground.enabled && cfg.loadingBackground.useIntroVideo;
+        return cfg.general.enabled && cfg.loadingBackground.enabled;
     }
 
     /**
@@ -1185,16 +1187,6 @@ public final class AuraIntroVideoManager {
      * the two players are drifting apart. A freeze that leaves no other trace at all is otherwise
      * impossible to tell apart from a log that simply ended.</p>
      */
-    /**
-     * Volume for the loading scene. With a baked video that scene plays the beginning of the intro, so the
-     * intro's volume applies - it is one continuous soundtrack, and using the loading background's own
-     * (muted by default) volume meant the first half of the clip had no sound at all. The separate loading
-     * clip keeps its own volume.
-     */
-    private static int loadingVolume(AuraIntroConfig cfg) {
-        return isBakedVideo(cfg) ? cfg.video.videoVolume : cfg.loadingBackground.volume;
-    }
-
     /** True when a baked video's sound is played by its own player rather than by the video player. */
     private static boolean usesSeparateAudioPlayer(AuraIntroConfig cfg) {
         return isBakedVideo(cfg) && !cfg.video.audioInSamePlayer;
@@ -1585,13 +1577,26 @@ public final class AuraIntroVideoManager {
         return AuraIntroConfigHolder.get().hideSplash();
     }
 
-    /** {@code -1} means "do not scale the buttons" (either disabled or following vanilla). */
-    public float buttonGuiScaleFor(Screen screen) {
+    /**
+     * The factor the title screen widgets are drawn scaled by, or {@code -1} when they should not be
+     * scaled at all (mod off, not the title screen, or the configured scale already equals the one
+     * the game runs at).
+     *
+     * <p>The configured value uses vanilla's own GUI scale semantics: an integer, resolved through
+     * {@code Window.calculateScale} exactly like the game's "GUI Scale" option does it (which also
+     * clamps it to what the window supports, and treats {@code 0} as "Auto"). The returned factor is
+     * that scale relative to the scale the rest of the UI runs at, so the buttons end up exactly as
+     * vanilla would draw them at that scale - pixel for pixel.</p>
+     */
+    public float buttonScaleFactorFor(Screen screen) {
         AuraIntroConfig cfg = AuraIntroConfigHolder.get();
-        if (!cfg.general.enabled || !(screen instanceof TitleScreen) || cfg.layout.buttonsGuiScale <= 0.0F) {
+        if (!cfg.general.enabled || !(screen instanceof TitleScreen) || cfg.layout.buttonsGuiScale < 0) {
             return -1.0F;
         }
-        return cfg.buttonsGuiScaleOrDefault(1.0F);
+        Window window = Minecraft.getInstance().getWindow();
+        int buttonScale = window.calculateScale(cfg.layout.buttonsGuiScale, false);
+        float factor = buttonScale / (float) window.getGuiScale();
+        return Math.abs(factor - 1.0F) < 1.0E-4F ? -1.0F : factor;
     }
 
     /** Called after {@code TitleScreen.init()} to push the buttons down/up by the configured amount. */
@@ -1608,18 +1613,51 @@ public final class AuraIntroVideoManager {
     }
 
     /**
-     * Transforms a mouse coordinate into the coordinate space the scaled buttons are drawn in,
-     * so hit testing keeps matching what the user sees.
+     * Pushes the pose that draws one title screen widget at vanilla's layout for the configured
+     * button GUI scale (call between {@code pushMatrix()} and {@code popMatrix()} on the stack).
+     *
+     * <p>Vanilla lays the title screen out against fixed anchors, so the transform has to use those
+     * same anchors: every widget is centred on {@code width / 2}, the button block starts at
+     * {@code height / 4 + 48}, and the copyright line hangs off the bottom edge. Scaling around the
+     * screen centre instead (what a naive "GUI scale" transform does) moves the whole block by a
+     * quarter of the screen height relative to vanilla's own layout whenever the two scales differ.</p>
      */
-    public static double[] toButtonSpace(double x, double y, float scale) {
-        int guiWidth = Minecraft.getInstance().getWindow().getGuiScaledWidth();
-        int guiHeight = Minecraft.getInstance().getWindow().getGuiScaledHeight();
-        double centerX = guiWidth / 2.0D;
-        double centerY = guiHeight / 2.0D;
-        return new double[]{
-                centerX + (x - centerX) / scale,
-                centerY + (y - centerY) / scale
-        };
+    public static void pushButtonScale(Matrix3x2fStack pose, AbstractWidget widget, float factor,
+                                       int guiWidth, int guiHeight) {
+        float x = widget.getX();
+        float y = widget.getY();
+        float targetX = guiWidth / 2.0F + (x - guiWidth / 2.0F) * factor;
+        float targetY = buttonScaleTargetY(widget, guiHeight, factor);
+        pose.translate(targetX, targetY);
+        pose.scale(factor, factor);
+        pose.translate(-x, -y);
+    }
+
+    /**
+     * Transforms a mouse coordinate into the coordinate space of the scaled widget, so hit testing
+     * keeps matching what the user sees - the exact inverse of {@link #pushButtonScale}.
+     */
+    public static double[] mouseToButtonSpace(AbstractWidget widget, double x, double y, float factor,
+                                              int guiWidth, int guiHeight) {
+        double transformedX = guiWidth / 2.0 + (x - guiWidth / 2.0) / factor;
+        double transformedY;
+        if (widget.getY() + widget.getHeight() >= guiHeight) {
+            transformedY = guiHeight - (guiHeight - y) / factor;
+        } else {
+            transformedY = guiHeight / 4.0 + (y - guiHeight / 4.0) / factor;
+        }
+        return new double[]{transformedX, transformedY};
+    }
+
+    /** Where a widget's top edge belongs at the button GUI scale, using vanilla's own anchor. */
+    private static float buttonScaleTargetY(AbstractWidget widget, int guiHeight, float factor) {
+        float y = widget.getY();
+        if (y + widget.getHeight() >= guiHeight) {
+            // Bottom-anchored (the copyright line): its distance to the bottom edge scales.
+            return guiHeight - (guiHeight - y) * factor;
+        }
+        // The button block is anchored at height / 4 (plus fixed offsets), not the centre.
+        return guiHeight / 4.0F + (y - guiHeight / 4.0F) * factor;
     }
 
     // ------------------------------------------------------------------
