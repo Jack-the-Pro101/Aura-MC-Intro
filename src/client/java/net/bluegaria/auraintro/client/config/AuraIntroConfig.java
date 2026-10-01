@@ -315,10 +315,14 @@ public class AuraIntroConfig implements ConfigData {
         @ConfigEntry.Gui.Tooltip
         public boolean enabled = true;
 
-        /** Fade-in duration once the loading screen appears, in milliseconds. */
+        /**
+         * Fade-in duration once the loading screen appears, in milliseconds. 0 (the default) cuts
+         * straight to the video's first frame; the plain loading background shows only for the
+         * moments before that frame was decoded.
+         */
         @ConfigEntry.Gui.Tooltip
         @ConfigEntry.BoundedDiscrete(min = 0, max = 20000)
-        public int fadeInMs = 500;
+        public int fadeInMs = 0;
 
         /**
          * Hide the vanilla "MOJANG STUDIOS" logo while the video is showing, so the
@@ -356,7 +360,7 @@ public class AuraIntroConfig implements ConfigData {
          */
         @ConfigEntry.Gui.Tooltip
         @ConfigEntry.BoundedDiscrete(min = 0, max = 600000)
-        public int holdAtMs = 0;
+        public int holdAtMs = 3400;
     }
 
     // ------------------------------------------------------------------

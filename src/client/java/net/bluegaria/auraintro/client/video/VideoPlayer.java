@@ -96,6 +96,15 @@ public interface VideoPlayer {
         return false;
     }
 
+    /**
+     * True once a preloaded session is actually parked on the frame it exists to show (the first
+     * picture for a video player, the first sound chunk for an audio-only one), rather than still
+     * decoding it. Resuming any earlier would put nothing on screen.
+     */
+    default boolean isPreloadParked() {
+        return true;
+    }
+
     /** Starts playback of a preloaded session. */
     default void resumeFromPreload() {
     }

@@ -37,6 +37,11 @@ final class PulseAudioOutput implements AudioOutput {
     private static final int PA_STREAM_PLAYBACK = 1;
     /** pa_sample_format_t: signed 16-bit little endian, the format the resampler emits. */
     private static final int PA_SAMPLE_S16LE = 3;
+    /**
+     * The stream's server-side depth (see {@link #tryOpen}). Also the honest minimum of its
+     * latency: everything written spends at least this long in the pipeline before it is heard.
+     */
+    private static final long TARGET_BUFFER_US = 200_000L;
 
     private static volatile PulseSimple library;
     private static volatile boolean libraryMissing;
@@ -115,9 +120,9 @@ final class PulseAudioOutput implements AudioOutput {
         // Cap = target: the buffered depth then stays where it settled, so the latency remembered
         // for the clock (see mediaPositionUs) equals the steady depth instead of a fill peak that
         // would leave the picture lagging the sound by the difference.
-        attr.maxlength = 200_000; // ~200 ms, and a hard cap: without one writes never block and a
-                                  // clock-paced decoder cannot be paced by its own audio queue
-        attr.tlength = 200_000;   // ~200 ms target buffer - stall headroom at a small clock lag
+        attr.maxlength = (int) TARGET_BUFFER_US; // ~200 ms, and a hard cap: without one writes never block and a
+                                                 // clock-paced decoder cannot be paced by its own audio queue
+        attr.tlength = (int) TARGET_BUFFER_US;   // ~200 ms target buffer - stall headroom at a small clock lag
         attr.prebuf = 0;          // start playing with the first bytes: a prebuf gate re-arms after every
                                   // flush/underrun and deadlocks against a clock-paced decoder that only
                                   // produces more audio once playback has started
@@ -309,6 +314,15 @@ final class PulseAudioOutput implements AudioOutput {
     @Override
     public void setVolume(float volume) {
         this.volume = Math.max(0.0f, Math.min(1.0f, volume));
+    }
+
+    @Override
+    public int nominalLatencyMs() {
+        // The configured server-side depth is the honest minimum; a live, plausible latency report
+        // is better when the server gives one (it includes the server's own extras). After
+        // PipeWire's post-underrun permanent-0 reports, the configured depth is all that is left.
+        long us = Math.max(TARGET_BUFFER_US, this.lastLatencyUs);
+        return (int) Math.min(1000L, us / 1000L);
     }
 
     @Override

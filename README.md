@@ -140,11 +140,11 @@ The loading background video's first frame is decoded **at client startup** (as 
 initialised, well before the loading screen appears), so the video is on screen the moment the loading
 screen shows up instead of flashing vanilla first. That preload plays **silently**: its volume is
 forced to `0` and the configured volume is only applied once the video is actually on screen, so no
-audio starts while the game window is still being set up. The silent preload keeps running while the
-game finishes starting up, so the visible playback is **restarted at 0 ms** when the loading screen
-appears - video and audio always play from the beginning, never from wherever the preload got to.
-`loadingBackground.fadeInMs` fades the video in on top of the loading screen (set it to `0` for a hard
-cut).
+audio starts while the game window is still being set up. The preload **parks on its first frame**
+(the decoder pauses itself the moment the frame exists, so it cannot run ahead of the loading screen
+that will show it), and visible playback simply continues from that frame - no seek, no decoder
+flush, no frozen start. `loadingBackground.fadeInMs` can fade the video in on top of the loading
+screen; it defaults to `0`, a hard cut straight to the first frame.
 
 ## Configuration
 
@@ -221,7 +221,7 @@ from the anchor is used after a few seconds so the loading screen still clears.
 | Option                                    | Default  | Description                                                                                                                                                                                          |
 | ----------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `loadingBackground.enabled`               | `true`   | Draw the intro video behind the vanilla loading bar instead of the plain red background. Off keeps the loading screen vanilla; the video then only starts (and fades in via `videoFadeInMs`) once loading has finished. |
-| `loadingBackground.fadeInMs`              | `500`    | Fade-in once the loading screen appears.                                                                                                                                                             |
+| `loadingBackground.fadeInMs`              | `0`      | Fade-in once the loading screen appears; `0` (default) cuts straight to the video.                                                                                    |
 | `loadingBackground.hideVanillaLogo`       | `true`   | Hides the vanilla MOJANG STUDIOS logo while the video is showing.                                                                                                                                    |
 | `loadingBackground.holdAtMs`              | `0`      | Frame of the video at which the loading scene freezes and waits for the game to finish loading; the intro continues from exactly that frame. `0` plays the whole clip during loading.                 |
 | `loadingBackground.loop`                  | `false`  | Off = hold the last frame, which leaves a static background for the loading bar.                                                                                                                     |

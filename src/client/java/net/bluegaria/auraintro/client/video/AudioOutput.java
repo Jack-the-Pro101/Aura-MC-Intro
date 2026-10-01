@@ -43,8 +43,19 @@ interface AudioOutput {
 
     void close();
 
-    /** Updates the sample-scaling factor; picked up by the next written chunk. */
+    /**
+     * Updates the sample-scaling factor; picked up by the next written chunk.
+     */
     void setVolume(float volume);
+
+    /**
+     * The depth of the output's own buffering, in milliseconds - how long a written sample travels
+     * before it is audible. Outputs whose {@link #mediaPositionUs()} already reflects this (a
+     * device position) do not need it and report 0.
+     */
+    default int nominalLatencyMs() {
+        return 0;
+    }
 
     /**
      * Whether {@link #mediaPositionUs()} is a trustworthy playback clock to pace the picture
