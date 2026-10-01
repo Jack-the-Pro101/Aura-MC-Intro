@@ -20,11 +20,12 @@ import org.slf4j.LoggerFactory;
  * sound server behind it, so its devices are either missing (the "default" device) or raw hardware
  * bound to one specific jack.</p>
  *
- * <p>{@code pa_simple_write} blocks while the server-side buffer is full, which paces the feed
- * exactly like a blocking {@code SourceDataLine.write}. Its reported latency is another matter:
- * on PipeWire's PulseAudio layer it collapses to a permanent 0 after the first underrun, so
- * {@link #mediaPositionUs()} is only a diagnostic estimate there and the player runs the picture
- * on wall time (see {@link #positionTrustworthy()}).</p>
+ * <p>The player writes each chunk when the wall clock reaches its timestamp, so the time from a
+ * write to the ear - the latency the server reports right after it - is exactly how far the sound
+ * trails its timestamp: the server buffer plus the sink's own delay (a Bluetooth codec and
+ * headset add a few hundred milliseconds). That measured figure is what the picture is delayed by
+ * ({@link #nominalLatencyMs()}). A report that is implausibly small - PipeWire's PulseAudio layer
+ * can report 0 around underruns - is ignored.</p>
  */
 final class PulseAudioOutput implements AudioOutput {
 
@@ -37,35 +38,48 @@ final class PulseAudioOutput implements AudioOutput {
     private static final int PA_STREAM_PLAYBACK = 1;
     /** pa_sample_format_t: signed 16-bit little endian, the format the resampler emits. */
     private static final int PA_SAMPLE_S16LE = 3;
+    /**
+     * The stream's server-side depth (see {@link #tryOpen}). Also the honest minimum of its
+     * latency: everything written spends at least this long in the pipeline before it is heard.
+     */
+    private static final long TARGET_BUFFER_US = 200_000L;
 
     private static volatile PulseSimple library;
     private static volatile boolean libraryMissing;
 
     private final PulseSimple pulse;
+    /** Guards the native stream: every libpulse call and the handle's release. */
+    private final Object streamLock = new Object();
     private volatile Pointer handle;
     private final int rate;
     private final int channels;
+    private final boolean debug;
+    private final IntByReference error = new IntByReference();
     private volatile float volume;
-    private long writtenBytes;
-    private long lastLatencyUs;
+    private volatile long writtenBytes;
     private boolean writeErrorLogged;
+    private byte[] silence;
 
-    // The playback clock. get_latency is the honest audible position while the server reports it,
-    // but on PipeWire's PulseAudio layer it turns into a permanent 0 after the first underrun -
-    // deriving the clock from it alone then makes "written - 0" race at write pace, which the
-    // picture chases in bursts (video freezing, catching up, freezing again). The audible position
-    // therefore advances at most with wall time and at most to what was written, with the latency
-    // report used whenever it is plausible.
+    // Write-to-ear latency, measured after every write (see measureLatency). Starts at the
+    // buffer target, the floor it can never be below once the stream plays.
+    private double latencyEmaUs = TARGET_BUFFER_US;
+    private volatile int publishedLatencyMs = (int) (TARGET_BUFFER_US / 1000L);
+
+    // Diagnostic playback position (mediaPositionUs): advances at most with wall time and never
+    // backwards, so a report that is briefly off cannot leap it. Guarded by `this`, which no
+    // blocking call ever holds - the client thread's pause/resume must not wait on a write.
     private long playedUs;
     private long playedStampNanos;
     private long pausedSinceNanos;
 
-    private PulseAudioOutput(PulseSimple pulse, Pointer handle, int rate, int channels, float volume) {
+    private PulseAudioOutput(PulseSimple pulse, Pointer handle, int rate, int channels, float volume,
+                             boolean debug) {
         this.pulse = pulse;
         this.handle = handle;
         this.rate = rate;
         this.channels = channels;
         this.volume = volume;
+        this.debug = debug;
     }
 
     /**
@@ -102,7 +116,7 @@ final class PulseAudioOutput implements AudioOutput {
             LOGGER.info("Opened a {} Hz x {} channel audio output through the system sound server "
                             + "(sink: {}) for {}", rate, channels, openedOn, context);
         }
-        return new PulseAudioOutput(pulse, handle, rate, channels, volume);
+        return new PulseAudioOutput(pulse, handle, rate, channels, volume, debug);
     }
 
     private static Pointer tryOpen(PulseSimple pulse, int rate, int channels, String device,
@@ -112,15 +126,28 @@ final class PulseAudioOutput implements AudioOutput {
         spec.rate = rate;
         spec.channels = (byte) channels;
         PaBufferAttr attr = new PaBufferAttr();
-        // Cap = target: the buffered depth then stays where it settled, so the latency remembered
-        // for the clock (see mediaPositionUs) equals the steady depth instead of a fill peak that
-        // would leave the picture lagging the sound by the difference.
-        attr.maxlength = 200_000; // ~200 ms, and a hard cap: without one writes never block and a
-                                  // clock-paced decoder cannot be paced by its own audio queue
-        attr.tlength = 200_000;   // ~200 ms target buffer - stall headroom at a small clock lag
-        attr.prebuf = 0;          // start playing with the first bytes: a prebuf gate re-arms after every
-                                  // flush/underrun and deadlocks against a clock-paced decoder that only
-                                  // produces more audio once playback has started
+        // pa_buffer_attr is in BYTES. (It used to be filled with the microsecond figure, which at
+        // 48 kHz stereo is ~1 s of audio: once prebuf stopped the server from skipping ahead,
+        // that whole second could sit in the server and the sound trailed the picture by it.)
+        //
+        // Cap = target = TARGET_BUFFER_US: writes block once that much is buffered, so the depth
+        // the picture is delayed by (nominalLatencyMs) is the depth the sound really has, and
+        // anything a stalled sink would let pile up beyond it stays in the player's queue, where
+        // the stale-drop can still throw it away instead of playing it late.
+        int target = bytesFor(rate, channels, TARGET_BUFFER_US);
+        int chunk = bytesFor(rate, channels, 20_000L);
+        attr.maxlength = target;
+        attr.tlength = target;
+        attr.minreq = chunk;
+        // Prebuf = the target minus one request (the largest prebuf the server accepts for this
+        // tlength). The player writes each chunk when the wall clock reaches its timestamp, so
+        // playback starts - and restarts after an underrun - only once the stream holds the
+        // depth the picture is delayed by: picture and sound start together. Never 0: with
+        // prebuf 0 the read index keeps running through an underrun and every later write lands
+        // "in the past" and is skipped (measured: 0 of 3 s of tone audible after a 2 s idle gap).
+        // The gate cannot deadlock - the player's writes are paced by the wall clock, not by
+        // playback.
+        attr.prebuf = target - chunk;
         try {
             // The client name groups the video's stream with the game's own sound in the desktop's
             // volume mixer, so per-application routing set for the game applies to the video too.
@@ -130,6 +157,10 @@ final class PulseAudioOutput implements AudioOutput {
             LOGGER.debug("Opening the sound server stream failed", t);
             return null;
         }
+    }
+
+    private static int bytesFor(int rate, int channels, long micros) {
+        return (int) (micros * rate / 1_000_000L) * channels * 2;
     }
 
     private static PulseSimple library() {
@@ -182,7 +213,7 @@ final class PulseAudioOutput implements AudioOutput {
         public byte channels;
     }
 
-    /** {@code pa_buffer_attr}, values in microseconds; -1 lets the server choose. */
+    /** {@code pa_buffer_attr}, values in bytes; -1 lets the server choose. */
     @Structure.FieldOrder({"maxlength", "tlength", "prebuf", "minreq", "fragsize"})
     public static class PaBufferAttr extends Structure {
         public int maxlength = -1;
@@ -196,7 +227,13 @@ final class PulseAudioOutput implements AudioOutput {
     // AudioOutput
     // ------------------------------------------------------------------
 
-    private static final IntByReference ERROR = new IntByReference();
+    /** Ignore latency reports below this: the stream's own prebuf depth alone is more. */
+    private static final long MIN_PLAUSIBLE_LATENCY_US = TARGET_BUFFER_US / 2L;
+    private static final long MAX_PLAUSIBLE_LATENCY_US = 2_000_000L;
+    /** Smoothing per 20 ms chunk - settles within about half a second. */
+    private static final double LATENCY_EMA_ALPHA = 1.0 / 16.0;
+    /** The picture's delay only follows a change larger than this, so it never jitters. */
+    private static final int LATENCY_HYSTERESIS_MS = 15;
 
     @Override
     public int rate() {
@@ -209,63 +246,78 @@ final class PulseAudioOutput implements AudioOutput {
     }
 
     @Override
-    public synchronized void write(byte[] chunk) {
-        Pointer stream = this.handle;
-        if (stream == null) {
-            return;
-        }
+    public void write(byte[] chunk) {
         float v = this.volume;
         if (v < 0.999f) {
             AudioOutput.scale(chunk, v);
         }
-        if (this.pulse.pa_simple_write(stream, chunk, chunk.length, ERROR) < 0) {
-            if (!this.writeErrorLogged) {
-                this.writeErrorLogged = true;
-                LOGGER.warn("Writing to the sound server failed (libpulse error {}) - "
-                        + "the video's sound stops here", ERROR.getValue());
+        if (!writeBlocking(chunk) && !this.writeErrorLogged && this.handle != null) {
+            this.writeErrorLogged = true;
+            LOGGER.warn("Writing to the sound server failed (libpulse error {}) - "
+                    + "the video's sound stops here", this.error.getValue());
+        }
+    }
+
+    @Override
+    public boolean idle() {
+        // Keeps the stream playing while the player is paused (the preload park, the loading
+        // hold): a stream that sits in an underrun lets the sound server suspend the sink after
+        // a few seconds, and waking a Bluetooth sink again takes a second or two - the start of
+        // the sound was lost to exactly that. Writing silence keeps it running at its target
+        // depth (the write blocks once the buffer is full, which paces this loop), so the real
+        // sound continues behind it at the same depth - and the latency is already measured by
+        // the time it does.
+        if (this.silence == null) {
+            this.silence = new byte[bytesFor(this.rate, this.channels, 20_000L)];
+        }
+        return writeBlocking(this.silence);
+    }
+
+    /** Writes (blocking while the server buffer is full) and measures the resulting latency. */
+    private boolean writeBlocking(byte[] data) {
+        synchronized (this.streamLock) {
+            Pointer stream = this.handle;
+            if (stream == null || this.pulse.pa_simple_write(stream, data, data.length, this.error) < 0) {
+                return false;
             }
+            this.writtenBytes += data.length;
+            measureLatency(stream);
+        }
+        return true;
+    }
+
+    /**
+     * Right after a write, the reported latency is how long the bytes just written take to be
+     * heard - and since the player writes each chunk at its timestamp, how far the sound trails
+     * the clock. Smoothed, and only republished on a real change, as the picture's delay.
+     */
+    private void measureLatency(Pointer stream) {
+        long latencyUs = this.pulse.pa_simple_get_latency(stream, this.error);
+        if (latencyUs < MIN_PLAUSIBLE_LATENCY_US || latencyUs > MAX_PLAUSIBLE_LATENCY_US) {
             return;
         }
-        this.writtenBytes += chunk.length;
+        this.latencyEmaUs += (latencyUs - this.latencyEmaUs) * LATENCY_EMA_ALPHA;
+        int emaMs = (int) Math.round(this.latencyEmaUs / 1000.0);
+        int published = this.publishedLatencyMs;
+        if (Math.abs(emaMs - published) > LATENCY_HYSTERESIS_MS) {
+            this.publishedLatencyMs = emaMs;
+            if (this.debug) {
+                LOGGER.info("Sound output latency is {} ms - the picture is delayed to match", emaMs);
+            }
+        }
     }
 
     @Override
     public synchronized long mediaPositionUs() {
-        Pointer stream = this.handle;
-        if (stream == null) {
-            return this.playedUs;
-        }
         long now = System.nanoTime();
         if (this.playedStampNanos == 0L) {
             this.playedStampNanos = now;
         }
-        // Wall time since the last sample, capped: silence (a starved writer, a thread that was
-        // not scheduled) does not play audio, so a long gap must not be credited to the audible
-        // position in one step - that leap is what the picture chases in a sped-up burst.
+        // Wall time since the last sample, capped: a starved writer does not play audio, so a long
+        // gap must not be credited to the audible position in one step.
         long elapsedUs = Math.min((now - this.playedStampNanos) / 1_000L, 150_000L);
         long writtenUs = this.writtenBytes * 1_000_000L / (this.rate * (long) this.channels * 2L);
-        long position;
-        long latencyUs = this.pulse.pa_simple_get_latency(stream, ERROR);
-        if (latencyUs >= 0L) {
-            long reportedUs = Math.max(0L, writtenUs - latencyUs);
-            if (reportedUs >= this.playedUs - 100_000L
-                    && reportedUs <= this.playedUs + elapsedUs + 100_000L) {
-                // An honest report - which includes everything between the write and the ear
-                // (server buffer *and* the output device's own latency, e.g. Bluetooth). Use it
-                // and remember the depth it implies, because...
-                this.lastLatencyUs = latencyUs;
-                position = reportedUs;
-            } else {
-                // ...on PipeWire's PulseAudio layer the report dies to a permanent 0 after the
-                // first underrun, and "written - 0" leads the audible sound by the whole buffered
-                // depth. The remembered depth keeps the clock glued to what is actually heard
-                // instead of racing the written position.
-                position = Math.max(0L, writtenUs - this.lastLatencyUs);
-            }
-        } else {
-            position = Math.max(0L, writtenUs - this.lastLatencyUs);
-        }
-        // Real-time playback: never advance faster than wall time either way.
+        long position = Math.max(0L, writtenUs - this.publishedLatencyMs * 1000L);
         position = Math.min(position, this.playedUs + elapsedUs);
         this.playedUs = Math.max(this.playedUs, position);
         this.playedStampNanos = now;
@@ -275,8 +327,8 @@ final class PulseAudioOutput implements AudioOutput {
     @Override
     public synchronized void start() {
         // pa_simple has no separate running state: playback is driven by the writes, and the
-        // audio thread parks by itself while the player is paused. Resuming only moves the
-        // clock's reference point past the pause, so no wall time accrues while paused.
+        // audio thread idles the stream by itself while the player is paused. Resuming only moves
+        // the diagnostic clock's reference point past the pause.
         if (this.pausedSinceNanos != 0L && this.playedStampNanos != 0L) {
             this.playedStampNanos += System.nanoTime() - this.pausedSinceNanos;
         }
@@ -285,25 +337,25 @@ final class PulseAudioOutput implements AudioOutput {
 
     @Override
     public synchronized void stop() {
-        // No cork/flush on pause: a flush here re-arms the server's prebuf state and deadlocks a
-        // clock-paced decoder. The audio thread parking is the pause; this only marks where the
-        // playback clock's wall-time term has to stop.
+        // No cork/flush on pause: the audio thread keeps the stream fed with silence (idle()).
         if (this.pausedSinceNanos == 0L) {
             this.pausedSinceNanos = System.nanoTime();
         }
     }
 
     @Override
-    public synchronized void flush() {
-        Pointer stream = this.handle;
-        if (stream != null && this.writtenBytes > 0L) {
-            this.pulse.pa_simple_flush(stream, ERROR);
+    public void flush() {
+        synchronized (this.streamLock) {
+            Pointer stream = this.handle;
+            if (stream != null && this.writtenBytes > 0L) {
+                this.pulse.pa_simple_flush(stream, this.error);
+            }
+            this.writtenBytes = 0L;
         }
-        // The flushed bytes never played: both the written and the played position restart at
-        // zero, or the clock would leap forward past everything ever written.
-        this.writtenBytes = 0L;
-        this.playedUs = 0L;
-        this.lastLatencyUs = 0L;
+        synchronized (this) {
+            // The flushed bytes never played: the played position restarts with the written one.
+            this.playedUs = 0L;
+        }
     }
 
     @Override
@@ -312,18 +364,24 @@ final class PulseAudioOutput implements AudioOutput {
     }
 
     @Override
+    public int nominalLatencyMs() {
+        return this.publishedLatencyMs;
+    }
+
+    @Override
     public boolean positionTrustworthy() {
-        // get_latency on PipeWire's PulseAudio layer dies to a permanent 0 after the first
-        // underrun; the wall-clamped estimate derived from it is decent for diagnostics but not
-        // a master clock. The picture is paced by wall time instead; the sound follows as well
-        // as the server plays it.
+        // The picture runs on wall time delayed by the measured latency; the sound is written to
+        // that same clock. A device-position clock is not needed - nor reliable here.
         return false;
     }
 
     @Override
-    public synchronized void close() {
-        Pointer stream = this.handle;
-        this.handle = null;
+    public void close() {
+        Pointer stream;
+        synchronized (this.streamLock) {
+            stream = this.handle;
+            this.handle = null;
+        }
         if (stream != null) {
             try {
                 this.pulse.pa_simple_free(stream);

@@ -8,6 +8,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URL;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -84,7 +85,16 @@ public final class VideoAssets {
                 if (parent != null) {
                     Files.createDirectories(parent);
                 }
-                Files.copy(in, target, StandardCopyOption.REPLACE_EXISTING);
+                // Through a temporary file: a reader (the decoder of another scene) must never
+                // open a half-written clip.
+                Path temporary = target.resolveSibling(fileName + ".part");
+                Files.copy(in, temporary, StandardCopyOption.REPLACE_EXISTING);
+                try {
+                    Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING,
+                            StandardCopyOption.ATOMIC_MOVE);
+                } catch (AtomicMoveNotSupportedException e) {
+                    Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING);
+                }
                 LOGGER.info("Unpacked the bundled video to {} - put your own clip in the configured path to "
                         + "use it instead", target);
                 return target;

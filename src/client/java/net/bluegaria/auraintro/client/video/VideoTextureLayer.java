@@ -202,12 +202,15 @@ public final class VideoTextureLayer {
         }
     }
 
+    /** Scratch for {@link #fitRect}: the layer is drawn on the render thread only, so no per-frame allocation. */
+    private final float[] fitRectBuffer = new float[8];
+
     /**
-     * Computes the destination rectangle plus the texture coordinates.
+     * Computes the destination rectangle plus the texture coordinates into {@link #fitRectBuffer}.
      *
      * @return {x0, y0, x1, y1, u0, u1, v0, v1}
      */
-    private static float[] fitRect(AuraIntroConfig.VideoFit fit, int videoWidth, int videoHeight,
+    private float[] fitRect(AuraIntroConfig.VideoFit fit, int videoWidth, int videoHeight,
                                    int guiWidth, int guiHeight) {
         double videoAspect = videoWidth / (double) videoHeight;
         double screenAspect = guiWidth / (double) guiHeight;
@@ -247,6 +250,15 @@ public final class VideoTextureLayer {
                 }
             }
         }
-        return new float[]{x0, y0, x1, y1, u0, u1, v0, v1};
+        float[] rect = this.fitRectBuffer;
+        rect[0] = x0;
+        rect[1] = y0;
+        rect[2] = x1;
+        rect[3] = y1;
+        rect[4] = u0;
+        rect[5] = u1;
+        rect[6] = v0;
+        rect[7] = v1;
+        return rect;
     }
 }

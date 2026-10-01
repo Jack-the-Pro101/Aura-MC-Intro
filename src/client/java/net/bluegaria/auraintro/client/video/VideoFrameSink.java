@@ -14,10 +14,12 @@ import java.nio.ByteBuffer;
  * <p>The decoder converts each frame directly into one of three staging buffers and publishes it; the
  * render thread uploads the newest published buffer straight into the texture's GPU storage
  * ({@link VideoTextureUploader} - no detour through the texture's own {@link NativeImage} copy). The
- * producer always writes into the buffer after the
- * published one, so the buffer the render thread is reading is never touched - no producer-side copy,
- * no lock held during conversion, and frames produced while the render thread is busy are dropped,
- * which is what an intro video wants - a late frame is worse than a skipped one.</p>
+ * producer always writes into the one buffer that is neither published nor being uploaded, so the
+ * buffer the render thread is reading is never touched - no producer-side copy, no lock held during
+ * the conversion, and frames produced while the render thread is busy are dropped, which is what an
+ * intro video wants - a late frame is worse than a skipped one. The render thread claims the buffer
+ * it is about to upload under the lock and uploads outside it: staging a 4K frame for the GPU can
+ * take milliseconds, and holding the lock for that used to stall the decoder behind every upload.</p>
  *
  * <p>Everything the render thread does per frame is the upload itself. In particular the alpha
  * masking for an opaque scene happens on the decode thread (see {@link #setForceOpaque}), where there is
@@ -28,7 +30,7 @@ public final class VideoFrameSink {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("Aura-Intro/Video");
     private static final int BYTES_PER_PIXEL = 4;
-    /** One buffer being displayed/copied, one being written, one in reserve: no copies, no tears. */
+    /** One buffer published, one being written, one in reserve for an upload in flight: no copies, no tears. */
     private static final int BUFFER_COUNT = 3;
 
     private final Object lock = new Object();
@@ -36,6 +38,24 @@ public final class VideoFrameSink {
     private final ByteBuffer[] buffers = new ByteBuffer[BUFFER_COUNT];
     private int latestIndex = -1;
     private boolean dirty;
+
+    /**
+     * The buffer the render thread is currently uploading, as an index and as the buffer itself.
+     * The index keeps the producer away from that buffer while it is being read; the reference
+     * still identifies it after a {@link #reallocate} reused the index for a new buffer. Volatile
+     * because the upload runs outside the lock - see {@link #claimLatest} and {@link #finishUpload}.
+     */
+    private volatile int readingIndex = -1;
+    private ByteBuffer readingBuffer;
+
+    /**
+     * A buffer whose memory could not be freed yet because the render thread was still reading it
+     * when the frame size changed. Freed the moment that upload finishes (or on {@link #close()}).
+     */
+    private ByteBuffer retiredBuffer;
+
+    /** Index of the buffer {@link #beginFrame} handed out; producer thread only. */
+    private int writingIndex = -1;
 
     /** Read by the producer thread, set once by the scene that owns this player. */
     private volatile boolean forceOpaque;
@@ -56,18 +76,19 @@ public final class VideoFrameSink {
     private volatile int outputWidth;
     private volatile int outputHeight;
 
-    private long producedFrames;
     private long lastUploadNanos;
 
-    private int width = -1;
-    private int height = -1;
-    private int visibleWidth = -1;
-    private int visibleHeight = -1;
+    // Written under the lock by the producer, read without it by the render thread's checks.
+    private volatile long producedFrames;
+    private volatile int width = -1;
+    private volatile int height = -1;
+    private volatile int visibleWidth = -1;
+    private volatile int visibleHeight = -1;
 
     /**
      * Drops this player's alpha channel while producing frames, so its picture works as an opaque
-     * background. Set for the loading scene (and for a baked single video, whose intro is composited the
-     * same way); the separate intro video keeps its transparency.
+     * background. Set for the loading scene (and the intro of the baked video, which is composited
+     * the same way).
      */
     public void setForceOpaque(boolean forceOpaque) {
         this.forceOpaque = forceOpaque;
@@ -100,7 +121,7 @@ public final class VideoFrameSink {
 
     /**
      * Producer side. Called from the decoder's frame thread: returns the buffer the next frame
-     * should be converted into - the one buffer the render thread is not reading and not holding.
+     * should be converted into - a buffer the render thread is neither publishing nor uploading.
      * The conversion (swscale) writes into it directly; {@link #commitFrame} then publishes it.
      *
      * @param frameWidth    width of the decoded picture (the buffers are resized to match)
@@ -115,7 +136,18 @@ public final class VideoFrameSink {
             if (this.width != frameWidth || this.height != frameHeight) {
                 this.reallocate(frameWidth, frameHeight);
             }
-            return this.buffers[(this.latestIndex + 1) % this.buffers.length];
+            // The one buffer that is neither published (latest) nor claimed by an upload in flight
+            // (reading). With three buffers that always leaves exactly one, which is what lets the
+            // render thread upload outside the lock: the decoder never has to wait for an upload.
+            int reading = this.readingIndex;
+            for (int offset = 1; offset <= this.buffers.length; offset++) {
+                int candidate = (this.latestIndex + offset) % this.buffers.length;
+                if (candidate != this.latestIndex && candidate != reading) {
+                    this.writingIndex = candidate;
+                    return this.buffers[candidate];
+                }
+            }
+            return null; // Unreachable with three buffers: latest and reading exclude at most two.
         }
     }
 
@@ -152,12 +184,13 @@ public final class VideoFrameSink {
      */
     public void commitFrame(int visibleWidth, int visibleHeight) {
         synchronized (this.lock) {
-            if (this.width <= 0) {
+            if (this.width <= 0 || this.writingIndex < 0) {
                 return;
             }
             this.visibleWidth = visibleWidth > 0 && visibleWidth <= this.width ? visibleWidth : this.width;
             this.visibleHeight = visibleHeight > 0 && visibleHeight <= this.height ? visibleHeight : this.height;
-            this.latestIndex = (this.latestIndex + 1) % this.buffers.length;
+            this.latestIndex = this.writingIndex;
+            this.writingIndex = -1;
             this.producedFrames++;
             this.dirty = true;
         }
@@ -166,15 +199,23 @@ public final class VideoFrameSink {
     /**
      * Consumer side, render thread: copies the newest published frame into the texture and uploads it.
      *
+     * <p>The buffer is claimed under the lock but the upload itself runs outside it: the GPU
+     * transfer can take milliseconds at 4K, and the decoder must not stall behind it. The claim
+     * keeps the producer off the buffer for exactly as long as the upload reads it.</p>
+     *
      * @return {@code true} when a new frame reached the texture
      */
     public boolean uploadIfDirty(DynamicTexture texture, int maxFps) {
+        ByteBuffer frame;
+        NativeImage image;
+        int width;
+        int height;
         synchronized (this.lock) {
             if (!this.dirty || this.latestIndex < 0 || this.width <= 0 || this.height <= 0) {
                 return false;
             }
-            NativeImage image = texture.getPixels();
-            if (image.getWidth() != this.width || image.getHeight() != this.height) {
+            image = texture.getPixels();
+            if (image == null || image.getWidth() != this.width || image.getHeight() != this.height) {
                 // The texture still holds a frame of another size; the layer resizes it on the next upload.
                 return false;
             }
@@ -186,18 +227,15 @@ public final class VideoFrameSink {
                 }
                 this.lastUploadNanos = now;
             }
-            // Uploaded under the lock so a concurrent producer cannot reuse this buffer half-way
-            // through; from the moment the call returns, the GPU owns the bytes it read.
             this.dirty = false;
-            ByteBuffer frame = this.buffers[this.latestIndex];
-            frame.clear();
-            if (VideoTextureUploader.uploadRgba(texture, frame, this.width, this.height)) {
-                return true;
+            frame = claimLatest();
+            if (frame == null) {
+                return false;
             }
-            MemoryUtil.memCopy(MemoryUtil.memAddress(frame), image.getPointer(),
-                    (long) this.width * this.height * BYTES_PER_PIXEL);
+            width = this.width;
+            height = this.height;
         }
-        texture.upload();
+        uploadClaimed(texture, image, frame, width, height);
         return true;
     }
 
@@ -213,24 +251,76 @@ public final class VideoFrameSink {
      * @return {@code true} when the texture now holds the frame
      */
     public boolean uploadLatest(DynamicTexture texture) {
+        ByteBuffer frame;
+        NativeImage image;
+        int width;
+        int height;
         synchronized (this.lock) {
             if (this.latestIndex < 0 || this.width <= 0 || this.height <= 0) {
                 return false;
             }
-            NativeImage image = texture.getPixels();
+            image = texture.getPixels();
             if (image == null || image.getWidth() != this.width || image.getHeight() != this.height) {
                 return false;
             }
-            ByteBuffer frame = this.buffers[this.latestIndex];
-            frame.clear();
-            if (VideoTextureUploader.uploadRgba(texture, frame, this.width, this.height)) {
-                return true;
+            frame = claimLatest();
+            if (frame == null) {
+                return false;
             }
-            MemoryUtil.memCopy(MemoryUtil.memAddress(frame), image.getPointer(),
-                    (long) this.width * this.height * BYTES_PER_PIXEL);
+            width = this.width;
+            height = this.height;
         }
-        texture.upload();
+        uploadClaimed(texture, image, frame, width, height);
         return true;
+    }
+
+    /**
+     * Uploads a buffer claimed by {@link #claimLatest} - outside the lock - and releases the claim.
+     * The direct GPU path is tried first; the copy through the texture's own image is the fallback.
+     */
+    private void uploadClaimed(DynamicTexture texture, NativeImage image, ByteBuffer frame,
+                               int width, int height) {
+        try {
+            frame.clear();
+            if (!VideoTextureUploader.uploadRgba(texture, frame, width, height)) {
+                MemoryUtil.memCopy(MemoryUtil.memAddress(frame), image.getPointer(),
+                        (long) width * height * BYTES_PER_PIXEL);
+                texture.upload();
+            }
+        } finally {
+            finishUpload();
+        }
+    }
+
+    /**
+     * Marks the newest published buffer as being read by the render thread. Callers hold the lock;
+     * the matching {@link #finishUpload()} runs after the upload, outside it.
+     */
+    private ByteBuffer claimLatest() {
+        int index = this.latestIndex;
+        ByteBuffer frame = index >= 0 ? this.buffers[index] : null;
+        if (frame == null) {
+            return null;
+        }
+        this.readingIndex = index;
+        this.readingBuffer = frame;
+        return frame;
+    }
+
+    /**
+     * Releases the claim of {@link #claimLatest} and frees a buffer that was retired underneath it
+     * by a size change. Also wakes a {@link #close()} that is waiting for the upload to finish.
+     */
+    private void finishUpload() {
+        synchronized (this.lock) {
+            this.readingIndex = -1;
+            this.readingBuffer = null;
+            if (this.retiredBuffer != null) {
+                MemoryUtil.memFree(this.retiredBuffer);
+                this.retiredBuffer = null;
+            }
+            this.lock.notifyAll();
+        }
     }
 
     /**
@@ -262,15 +352,37 @@ public final class VideoFrameSink {
 
     public void close() {
         synchronized (this.lock) {
+            // An upload in flight (it runs outside the lock) is still reading one of the buffers:
+            // wait for it instead of freeing the memory underneath it. finishUpload() wakes this
+            // wait; a wedged render thread leaks the buffers rather than crashing under it - the
+            // same trade-off the player itself makes for its decoder threads.
+            long deadline = System.nanoTime() + 5_000_000_000L;
+            while (this.readingIndex >= 0 && System.nanoTime() < deadline) {
+                try {
+                    this.lock.wait(100L);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            if (this.readingIndex >= 0) {
+                LOGGER.warn("An upload of this video was still running at close time - leaking its buffers");
+                return;
+            }
             for (int i = 0; i < this.buffers.length; i++) {
                 MemoryUtil.memFree(this.buffers[i]);
                 this.buffers[i] = null;
+            }
+            if (this.retiredBuffer != null) {
+                MemoryUtil.memFree(this.retiredBuffer);
+                this.retiredBuffer = null;
             }
             this.width = -1;
             this.height = -1;
             this.visibleWidth = -1;
             this.visibleHeight = -1;
             this.latestIndex = -1;
+            this.writingIndex = -1;
             this.dirty = false;
             this.producedFrames = 0L;
         }
@@ -281,30 +393,65 @@ public final class VideoFrameSink {
         this.height = frameHeight;
         long size = (long) frameWidth * frameHeight * BYTES_PER_PIXEL;
         for (int i = 0; i < this.buffers.length; i++) {
-            MemoryUtil.memFree(this.buffers[i]);
+            ByteBuffer old = this.buffers[i];
             this.buffers[i] = MemoryUtil.memAlloc((int) size);
+            if (old == null) {
+                continue;
+            }
+            if (old == this.readingBuffer) {
+                // The render thread is still uploading from this buffer: freeing it here would
+                // pull the memory out from under that upload. Park it; finishUpload() frees it
+                // the moment the upload is done.
+                this.retiredBuffer = old;
+            } else {
+                MemoryUtil.memFree(old);
+            }
         }
         this.latestIndex = -1;
         this.dirty = false;
     }
 
-    /** Sets the alpha channel of every pixel to opaque, keeping the colour channels untouched. */
+    /**
+     * The alpha byte of a pixel sits in the high byte of its little-endian RGBA word, so one long
+     * covers the alpha of two neighbouring pixels - the mask for the vectorised alpha passes below.
+     */
+    private static final long ALPHA_MASK_2PX = 0xFF000000FF000000L;
+
+    /**
+     * Sets the alpha channel of every pixel to opaque, keeping the colour channels untouched.
+     *
+     * <p>Two pixels per long access - a quarter of the memory operations of the per-pixel loop this
+     * replaced, which mattered because this pass runs on the decode thread for every frame of an
+     * alpha-carrying clip.</p>
+     */
     private static void forceOpaqueAlpha(ByteBuffer buffer, int pixelCount) {
-        long base = MemoryUtil.memAddress(buffer);
-        for (int i = 0; i < pixelCount; i++) {
-            long address = base + (long) i * 4L;
+        long address = MemoryUtil.memAddress(buffer);
+        long end = address + (long) pixelCount * BYTES_PER_PIXEL;
+        // The staging buffers come from malloc, so the long accesses stay aligned.
+        for (; address + 8L <= end; address += 8L) {
+            MemoryUtil.memPutLong(address, MemoryUtil.memGetLong(address) | ALPHA_MASK_2PX);
+        }
+        if (address < end) {
+            // A lone trailing pixel of an odd frame size.
             MemoryUtil.memPutInt(address, MemoryUtil.memGetInt(address) | 0xFF000000);
         }
     }
 
-    /** Whether any pixel of the frame is not fully opaque. */
+    /**
+     * Whether any pixel of the frame is not fully opaque - two pixels per long access, exiting on
+     * the first pixel pair that is not fully opaque.
+     */
     private static boolean hasAlpha(ByteBuffer buffer, int pixelCount) {
-        long base = MemoryUtil.memAddress(buffer);
-        long end = base + (long) pixelCount * BYTES_PER_PIXEL;
-        for (long address = base + 3L; address < end; address += 4L) {
-            if (MemoryUtil.memGetByte(address) != (byte) 0xFF) {
+        long address = MemoryUtil.memAddress(buffer);
+        long end = address + (long) pixelCount * BYTES_PER_PIXEL;
+        for (; address + 8L <= end; address += 8L) {
+            long word = MemoryUtil.memGetLong(address);
+            if ((word & ALPHA_MASK_2PX) != ALPHA_MASK_2PX) {
                 return true;
             }
+        }
+        if (address < end && (MemoryUtil.memGetInt(address) & 0xFF000000) != 0xFF000000) {
+            return true;
         }
         return false;
     }

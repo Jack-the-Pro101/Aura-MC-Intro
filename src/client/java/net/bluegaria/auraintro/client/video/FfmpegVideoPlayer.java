@@ -51,8 +51,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *
  * <p>Threading model: open/preload happens on the caller's background thread, one decode thread
  * walks the file and feeds the {@link VideoFrameSink} and the audio queue, one audio thread
- * writes PCM (its blocking writes are the playback clock), and the client thread only ever
- * touches cheap volatile state - never a native call.</p>
+ * writes PCM to the output, and the client thread only ever touches cheap volatile state - never
+ * a native call. The playback clock is the wall clock, unless the output's device position can
+ * be trusted to drive it (see {@link #clockMs}).</p>
  */
 public final class FfmpegVideoPlayer implements VideoPlayer {
 
@@ -78,7 +79,6 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     private static final Logger LOGGER = LoggerFactory.getLogger("Aura-Intro/Video");
 
     /** {@code EAGAIN} as FFmpeg reports it (the negated errno); EAGAIN is 11 on all three OSes. */
-
     private static final int AVERROR_EAGAIN = -11;
     /** Decoder threading modes (FFmpeg's FF_THREAD_FRAME/FF_THREAD_SLICE macros). */
     private static final int FF_THREAD_FRAME = 1;
@@ -106,6 +106,12 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
      * it: a blocked audio thread (an output wedged in its native call) must not freeze the video.
      */
     private static final long AUDIO_CLOCK_STALE_NANOS = 600_000_000L;
+
+    /**
+     * Audio more than this far behind the picture clock counts as stale and is dropped rather
+     * than played late - played-late audio accumulates into a permanent desync.
+     */
+    private static final long STALE_AUDIO_MS = 40L;
 
     public FfmpegVideoPlayer() {
         this(Mode.VIDEO);
@@ -146,6 +152,13 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     private volatile int sourceWidth;
     private volatile int sourceHeight;
     private volatile boolean firstFrameSeen;
+    /**
+     * Set only when a first frame actually reached the frame sink (a presented picture).
+     * {@link #firstFrameSeen} alone is not enough there: the first decoded audio chunk sets it too,
+     * and a preload parked before any picture exists would have nothing to show on the loading
+     * screen it exists for.
+     */
+    private volatile boolean firstVideoFrameSeen;
 
     // Control values, written from the client thread.
     private volatile float volume = 1.0f;
@@ -213,6 +226,16 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     private int swsOutWidth = -1;
     private int swsOutHeight = -1;
     private AVFrame rgbaFrame;
+    /**
+     * Cached wrappers of the sink's rotating staging buffers, keyed by the buffer's address. The
+     * sink hands out one of three buffers per frame; wrapping each of them once instead of every
+     * frame saves a JavaCPP allocation (plus its direct-buffer address lookup) per decoded frame.
+     */
+    private final long[] rgbaTargetAddresses = {-1L, -1L, -1L};
+    private final BytePointer[] rgbaTargets = new BytePointer[3];
+    private int rgbaTargetSlot;
+    /** Whether the freshly allocated rgba frame still needs its pointers/linesizes filled in. */
+    private boolean rgbaFrameNeedsFill = true;
 
     private SwrContext swrContext;
     private int swrInFormat = -1;
@@ -237,10 +260,11 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     private long presentedFrames;
     private AVFrame swFrame;
 
-    // Decode-thread bookkeeping.
-    private long anchorNanos;
-    private long pausedAtNanos;
-    private long clockOffsetMs;
+    // The wall clock: clockOffsetMs at anchorNanos. Volatile - set by the client thread (pause,
+    // resume) and by the decode thread (seeks), read by both worker threads.
+    private volatile long anchorNanos;
+    private volatile long pausedAtNanos;
+    private volatile long clockOffsetMs;
     /** Whether {@link #audioClockMs} paces the picture; untrustworthy outputs run on wall time. */
     private volatile boolean useAudioClock;
     /**
@@ -258,6 +282,8 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     private boolean pendingStartSilence;
     private boolean audioQueueWarningLogged;
     private long lastAvSyncLogNanos;
+    /** Diagnostics: chunks dropped as unsyncably stale (see audioLoop). */
+    private long staleAudioDropped;
 
     /** One resampled chunk of PCM on its way to the audio output. */
     private record PcmChunk(byte[] data, long ptsMs, long durationMs) {
@@ -269,6 +295,10 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
 
     @Override
     public boolean start(Path file, int volumePercent) {
+        // A plain start is never a preload, whatever this player was used for before: the audio
+        // thread holds its sound back while a preload is pending (see awaitUnparked).
+        this.preloaded = false;
+        this.pauseAfterFirstFrame = false;
         return open(file, volumePercent);
     }
 
@@ -311,7 +341,9 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
 
         // AV_TIME_BASE is microseconds.
         this.lengthMs = context.duration() > 0 ? context.duration() / 1000L : 0L;
-        this.videoStreamIndex = findStream(context, avutil.AVMEDIA_TYPE_VIDEO);
+        // An audio-only player never opens a video decoder, so it must not track the video stream
+        // either: the decode loop would route video packets into a decoder context that is null.
+        this.videoStreamIndex = hasVideoOutput() ? findStream(context, avutil.AVMEDIA_TYPE_VIDEO) : -1;
         this.audioStreamIndex = findStream(context, avutil.AVMEDIA_TYPE_AUDIO);
 
         if (hasVideoOutput() && this.videoStreamIndex >= 0) {
@@ -593,6 +625,17 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
                     performSeek(seekTo);
                     continue;
                 }
+                if (this.pauseAfterFirstFrame && !this.paused && hasPreloadFrame()) {
+                    // A preload only needs its first frame, so stop the moment it exists - here on
+                    // the decode thread, because the client thread that used to do the pausing can
+                    // be held up for seconds by start-up work, and a preload that ran ahead had to
+                    // be seeked back to 0 later, which flushes the decoder and froze the first
+                    // visible frames of the video. The pause timestamp is recorded so the wall
+                    // clock freezes for the park; the audio feed resumes with the real sound
+                    // right after it (see audioLoop).
+                    this.paused = true;
+                    this.pausedAtNanos = System.nanoTime();
+                }
                 if (this.paused) {
                     if (!this.singleFrameAfterSeek) {
                         sleepUnchecked(10);
@@ -607,8 +650,14 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
                     // Paced: stay a few frames ahead of the clock at most, so the picture can
                     // never run away from the sound - but only once the sound has its cushion
                     // too, otherwise the demuxer would never read further than the picture's
-                    // lead and the audio output would starve behind it.
-                    sleepUnchecked(5);
+                    // lead and the audio output would starve behind it. Sleep off the actual
+                    // overshoot instead of polling at a fixed rate: fewer wakeups per frame, and
+                    // the frame lands closer to its display time. Clamped from below because no
+                    // scheduler honours sub-millisecond sleeps, and from above so a pause or seek
+                    // request is still picked up promptly.
+                    double overshootMs = this.lastVideoPtsMs + this.frameDurationMs - videoClockMs()
+                            - MAX_VIDEO_LEAD_MS;
+                    sleepUnchecked(Math.max(2L, Math.min(15L, (long) overshootMs)));
                     continue;
                 }
                 int read = avformat.av_read_frame(this.formatContext, this.packet);
@@ -622,7 +671,7 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
                     continue;
                 }
                 int index = this.packet.stream_index();
-                if (index == this.videoStreamIndex) {
+                if (index == this.videoStreamIndex && this.videoCodecContext != null) {
                     decodeVideoPacket();
                 } else if (index == this.audioStreamIndex && this.audioCodecContext != null) {
                     decodeAudioPacket();
@@ -692,7 +741,13 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
                 }
                 continue;
             }
-            if (ptsMs - videoClockMs() > MAX_VIDEO_LEAD_MS && !audioCushionSufficient()) {
+            // Measured against the raw clock, not videoClockMs(): the output-latency compensation
+            // pushes the presentation target behind the wall clock, and a frame merely waiting
+            // for that target must never read as "so far ahead it is droppable". At playback
+            // start - and after every seek - the clock is younger than the latency, and against
+            // the compensated clock every frame (the whole head of the clip included) looked
+            // droppable while the audio cushion was still building.
+            if (ptsMs - clockMs() > MAX_VIDEO_LEAD_MS && !audioCushionSufficient()) {
                 // Far ahead of the clock only because the sound is being fed its cushion: decode
                 // (VP9 needs every frame as a reference) but skip the conversion and the
                 // presentation. The picture drops these frames the same way it drops late frames
@@ -748,14 +803,44 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
             return;
         }
         target.clear();
-        avutil.av_image_fill_arrays(this.rgbaFrame.data(), this.rgbaFrame.linesize(),
-                new BytePointer(target), avutil.AV_PIX_FMT_RGBA, outWidth, outHeight, 1);
+        BytePointer targetPointer = rgbaTargetPointer(target);
+        if (this.rgbaFrameNeedsFill) {
+            // Only a freshly allocated rgba frame needs its pointers and linesizes computed; for a
+            // frame of unchanged size re-pointing data[0] at the rotating buffer is all it takes.
+            this.rgbaFrameNeedsFill = false;
+            avutil.av_image_fill_arrays(this.rgbaFrame.data(), this.rgbaFrame.linesize(),
+                    targetPointer, avutil.AV_PIX_FMT_RGBA, outWidth, outHeight, 1);
+        } else {
+            this.rgbaFrame.data().put(0, targetPointer);
+        }
         swscale.sws_scale(this.swsContext, src.data(), src.linesize(),
                 0, height, this.rgbaFrame.data(), this.rgbaFrame.linesize());
         this.sink.processAlpha(target, outWidth * outHeight);
         this.sink.commitFrame(outWidth, outHeight);
         this.firstFrameSeen = true;
+        this.firstVideoFrameSeen = true;
         this.presentedFrames++;
+    }
+
+    /**
+     * The cached wrapper of the given staging buffer, created the first time that buffer turns up
+     * in the rotation. JavaCPP's {@code Pointer} has no address setter, so re-pointing one wrapper
+     * is not an option - but three wrappers cover the three rotating buffers, and after that no
+     * frame allocates anything.
+     */
+    private BytePointer rgbaTargetPointer(ByteBuffer target) {
+        long address = MemoryUtil.memAddress(target);
+        for (int i = 0; i < this.rgbaTargetAddresses.length; i++) {
+            if (this.rgbaTargetAddresses[i] == address) {
+                return this.rgbaTargets[i];
+            }
+        }
+        int slot = this.rgbaTargetSlot;
+        this.rgbaTargetSlot = (slot + 1) % this.rgbaTargets.length;
+        this.rgbaTargetAddresses[slot] = address;
+        BytePointer pointer = new BytePointer(target);
+        this.rgbaTargets[slot] = pointer;
+        return pointer;
     }
 
     /** Builds (or rebuilds) the YUV(A)/NV12 -> RGBA conversion for a new frame size/format. */
@@ -774,8 +859,9 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         this.swsOutWidth = dstWidth;
         this.swsOutHeight = dstHeight;
         // The destination frame is a pointer carrier: av_image_fill_arrays re-points its data at
-        // the sink's staging buffer for every frame.
+        // the sink's staging buffer (see presentFrame - once per size, re-pointed per frame).
         this.rgbaFrame = avutil.av_frame_alloc();
+        this.rgbaFrameNeedsFill = true;
         if (this.debug) {
             LOGGER.info("Scaling {}x{} (format {}) to {}x{} RGBA for {}",
                     srcWidth, srcHeight, format, dstWidth, dstHeight, this.file);
@@ -791,6 +877,13 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
             avutil.av_frame_free(this.rgbaFrame);
             this.rgbaFrame = null;
         }
+        this.rgbaTargetAddresses[0] = -1L;
+        this.rgbaTargetAddresses[1] = -1L;
+        this.rgbaTargetAddresses[2] = -1L;
+        this.rgbaTargets[0] = null;
+        this.rgbaTargets[1] = null;
+        this.rgbaTargets[2] = null;
+        this.rgbaFrameNeedsFill = true;
         this.swsFormat = -1;
         this.swsWidth = -1;
         this.swsHeight = -1;
@@ -978,24 +1071,57 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
                 if (chunk == null) {
                     continue;
                 }
-                while (this.paused && !this.closed) {
-                    sleepUnchecked(5);
-                }
+                boolean wasParked = awaitUnparked();
                 if (this.closed) {
                     return;
                 }
                 int generation = this.audioSeekGeneration;
                 byte[] data = chunk.data();
-                this.audioOutput.write(data);
+                if (!this.useAudioClock && chunk.ptsMs() >= 0) {
+                    // Wall-clock pacing: hand each chunk over when the clock reaches its
+                    // timestamp. The output then holds exactly its own depth (see
+                    // PulseAudioOutput's prebuf), which is what the picture is delayed by
+                    // (nominalLatencyMs) - instead of however much decoded-ahead audio its
+                    // buffer had room for, all of which would be heard that much late.
+                    while (!this.closed && generation == this.audioSeekGeneration) {
+                        if (awaitUnparked()) {
+                            wasParked = true;
+                            continue;
+                        }
+                        long aheadMs = chunk.ptsMs() - clockMs();
+                        if (aheadMs <= 0L) {
+                            break;
+                        }
+                        sleepUnchecked(Math.min(10L, aheadMs));
+                    }
+                    if (this.closed) {
+                        return;
+                    }
+                }
+                if (wasParked) {
+                    // The output sat idle across the pause: re-anchor the audio clock on the
+                    // first chunk after it.
+                    this.audioAnchorUs = Long.MIN_VALUE;
+                }
                 if (generation != this.audioSeekGeneration) {
                     // The chunk was in flight across a seek: its samples were flushed, and its
-                    // position says nothing about the new playback position - re-anchor instead.
+                    // position says nothing about the new playback position - drop it and
+                    // re-anchor on the next chunk instead of playing it into the new position.
                     this.audioAnchorUs = Long.MIN_VALUE;
                     continue;
                 }
+                if (chunk.ptsMs() >= 0 && chunk.ptsMs() < videoClockMs() - STALE_AUDIO_MS) {
+                    // Stale audio: older than the picture clock, so it could not be played in
+                    // sync anymore. Dropping it BEFORE the write (instead of writing it late)
+                    // keeps the sound glued to the picture across pauses and supply hiccups
+                    // alike - and only what is written can ever be heard.
+                    this.staleAudioDropped++;
+                    continue;
+                }
+                this.audioOutput.write(data);
                 this.audioWrittenBytes += data.length;
                 if (chunk.ptsMs() >= 0) {
-                    updateAudioClock(chunk.ptsMs());
+                    updateAudioClock(chunk.ptsMs(), chunk.durationMs());
                 }
                 debugAvSync();
             }
@@ -1007,17 +1133,38 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     }
 
     /**
+     * Holds the audio thread while the player is paused - or still preloading: the preload runs
+     * at volume 0, and sound written then would be lost from the start of the clip. Meanwhile the
+     * output is kept busy ({@link AudioOutput#idle()}) so the device is awake the moment the
+     * sound resumes. Returns whether it had to wait.
+     */
+    private boolean awaitUnparked() {
+        boolean waited = false;
+        while (!this.closed && (this.paused || this.preloaded || this.pauseAfterFirstFrame)) {
+            waited = true;
+            if (!this.audioOutput.idle()) {
+                sleepUnchecked(5);
+            }
+        }
+        return waited;
+    }
+
+    /**
      * Maps the output's media position onto the stream's timestamps. Only a position the output
      * itself accounts for ({@link AudioOutput#positionTrustworthy()}) paces the picture; the rest
      * use this as a diagnostic and as the audio-only player's reported position.
      */
-    private void updateAudioClock(long chunkPtsMs) {
+    private void updateAudioClock(long chunkPtsMs, long chunkDurationMs) {
         // The clock is what is audible right now: the output's media time (what the device has
         // played) mapped onto the stream's timestamps at the anchor chunk.
         long mediaUs = this.audioOutput.mediaPositionUs();
         if (this.audioAnchorUs == Long.MIN_VALUE) {
             this.audioAnchorUs = mediaUs;
-            this.audioAnchorPtsMs = chunkPtsMs;
+            // A trusted device position is anchored on the chunk directly. An output paced on
+            // the wall clock instead reports "written minus its latency", and the chunk just
+            // written ends at the written position: what is audible right now is that far back.
+            this.audioAnchorPtsMs = this.useAudioClock ? chunkPtsMs
+                    : chunkPtsMs + chunkDurationMs - this.audioOutput.nominalLatencyMs();
             this.audioAnchorWrittenBytes = this.audioWrittenBytes;
             this.audioMediaUsFloor = mediaUs;
             // The stale-clock extrapolation may have run the clock ahead of the device while the
@@ -1061,11 +1208,10 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         }
         this.lastAvSyncLogNanos = now;
         if (this.audioClockValid && this.lastVideoPtsMs >= 0L) {
-            LOGGER.info("A/V sync: picture {} ms, audible sound {} ms (picture leads by {} ms){}",
-                    this.lastVideoPtsMs, this.audioClockMs, this.lastVideoPtsMs - this.audioClockMs,
-                    this.audioLatencyMs != 0
-                            ? " - " + this.audioLatencyMs + " ms output latency compensation"
-                            : "");
+            LOGGER.info("A/V sync: decoded picture {} ms, audible sound {} ms, output latency {} ms, "
+                            + "configured offset {} ms, stale sound chunks dropped {}",
+                    this.lastVideoPtsMs, this.audioClockMs, this.audioOutput.nominalLatencyMs(),
+                    this.audioLatencyMs, this.staleAudioDropped);
         }
     }
 
@@ -1112,13 +1258,6 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     }
 
     /**
-     * The playback clock the picture is paced against. The master is wall time; an output whose
-     * device position can be accounted for ({@link AudioOutput#positionTrustworthy()}, e.g. a
-     * {@code SourceDataLine}) lets the sound drive it instead, so picture and audio stay tightly
-     * glued. Either way the clock is monotonic between seeks and can never stall with a wedged
-     * output - a misbehaving sound degrades the sound, never the scene.
-     */
-    /**
      * The clock the picture is paced against: the playback clock minus the configured output
      * latency compensation. {@link #audioLatencyMs} shifts the picture later by that amount -
      * the compensation for an output whose latency the program cannot measure, where the position
@@ -1127,9 +1266,25 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
      * reported position visibly leads the sound that reaches the ears).
      */
     private long videoClockMs() {
-        return clockMs() - this.audioLatencyMs;
+        long latencyMs = this.audioLatencyMs;
+        if (!this.useAudioClock && this.audioOutput != null) {
+            // Wall-clock pacing cannot see the output's own latency: a written sample first spends
+            // the output's buffer depth in the pipeline before it is heard, so pacing the picture
+            // on raw wall time has it lead the audible sound by exactly that depth. An output whose
+            // device position paces the picture (useAudioClock) already includes it - and would be
+            // corrected twice.
+            latencyMs += this.audioOutput.nominalLatencyMs();
+        }
+        return clockMs() - latencyMs;
     }
 
+    /**
+     * The playback clock. The master is wall time; an output whose device position can be
+     * accounted for ({@link AudioOutput#positionTrustworthy()}, e.g. a {@code SourceDataLine})
+     * lets the sound drive it instead, so picture and audio stay tightly glued. Either way the
+     * clock is monotonic between seeks and can never stall with a wedged output - a misbehaving
+     * sound degrades the sound, never the scene.
+     */
     private long clockMs() {
         long value;
         if (this.useAudioClock && this.audioClockValid) {
@@ -1226,15 +1381,11 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
                 this.pausedAtNanos = 0L;
             }
             if (this.audioOutput != null) {
+                // No flush on resume (only an actual seek flushes): the audio thread simply
+                // continues the feed where the pause left it.
                 this.audioOutput.start();
             }
         }
-    }
-
-    @Override
-    public void queryTimeMs(java.util.function.LongConsumer consumer) {
-        // The cached value is all there is - and it costs nothing, unlike a native query.
-        consumer.accept(this.cachedTimeMs);
     }
 
     @Override
@@ -1256,21 +1407,55 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         return this.preloaded && !this.finished;
     }
 
+    /**
+     * True once the preload has what it was asked to hold on screen (see {@link #hasPreloadFrame}).
+     * {@link #isPreloaded()} alone only says the file was opened - the first frame can still be
+     * decoding, and resuming before it exists would show nothing where the preload exists to be
+     * shown.
+     */
+    @Override
+    public boolean isPreloadParked() {
+        return hasPreloadFrame();
+    }
+
     @Override
     public void resumeFromPreload() {
         if (this.preloaded) {
             this.preloaded = false;
+            // A resumed player must never park itself again: if the resume raced the first frame
+            // (the loading screen's first tick can beat the decoder), the self-pause would otherwise
+            // arm mid-playback and nothing would ever unpause it - a frozen picture and no sound.
+            this.pauseAfterFirstFrame = false;
+            // The audio thread holds the real sound back until here (see awaitUnparked).
             setPaused(false);
+            // The preload was parked on its first frame - usually by its own decode thread, whose
+            // pause does not freeze the wall clock. Start the playback clock at that frame's
+            // position: without this, the whole paused preload counts as elapsed wall time and the
+            // picture would race through the start of the clip to catch up with the clock.
+            // Anchor before offset, floor last: a worker reading in between sees a clock that is
+            // at most too early, never one far ahead that the floor would then pin.
+            this.anchorNanos = System.nanoTime();
+            this.clockOffsetMs = Math.max(0L, this.cachedTimeMs);
+            this.clockFloorMs = Long.MIN_VALUE;
         }
     }
 
     @Override
     public boolean consumePauseAfterFirstFrame() {
-        if (this.pauseAfterFirstFrame && this.firstFrameSeen) {
+        if (this.pauseAfterFirstFrame && hasPreloadFrame()) {
             this.pauseAfterFirstFrame = false;
             return true;
         }
         return false;
+    }
+
+    /**
+     * Whether a preload that is about to be paused has what it needs on screen: a converted frame
+     * for a player with a picture, a queued sound chunk for an audio-only player. Pausing any
+     * earlier parks the preload with nothing to show.
+     */
+    private boolean hasPreloadFrame() {
+        return hasVideoOutput() ? this.firstVideoFrameSeen : this.firstFrameSeen;
     }
 
     @Override
@@ -1399,17 +1584,15 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
 
     /** FFmpeg's av_err2str, which is a C macro and has no JavaCPP binding. */
     private static String errorString(int code) {
-        byte[] bytes = new byte[128];
-        BytePointer buffer = new BytePointer(bytes);
+        // A native buffer read back after the call: BytePointer(byte[]) would only copy the Java
+        // array into native memory, and the message written there never came back (every error
+        // used to be logged as an empty string).
+        BytePointer buffer = new BytePointer(128L);
         try {
-            avutil.av_strerror(code, buffer, bytes.length);
+            return avutil.av_strerror(code, buffer, buffer.capacity()) < 0
+                    ? "error " + code : buffer.getString();
         } finally {
             buffer.releaseReference();
         }
-        int end = 0;
-        while (end < bytes.length && bytes[end] != 0) {
-            end++;
-        }
-        return new String(bytes, 0, end, java.nio.charset.StandardCharsets.US_ASCII);
     }
 }

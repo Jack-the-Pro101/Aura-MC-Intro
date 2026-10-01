@@ -140,11 +140,11 @@ The loading background video's first frame is decoded **at client startup** (as 
 initialised, well before the loading screen appears), so the video is on screen the moment the loading
 screen shows up instead of flashing vanilla first. That preload plays **silently**: its volume is
 forced to `0` and the configured volume is only applied once the video is actually on screen, so no
-audio starts while the game window is still being set up. The silent preload keeps running while the
-game finishes starting up, so the visible playback is **restarted at 0 ms** when the loading screen
-appears - video and audio always play from the beginning, never from wherever the preload got to.
-`loadingBackground.fadeInMs` fades the video in on top of the loading screen (set it to `0` for a hard
-cut).
+audio starts while the game window is still being set up. The preload **parks on its first frame**
+(the decoder pauses itself the moment the frame exists, so it cannot run ahead of the loading screen
+that will show it), and visible playback simply continues from that frame - no seek, no decoder
+flush, no frozen start. `loadingBackground.fadeInMs` can fade the video in on top of the loading
+screen; it defaults to `0`, a hard cut straight to the first frame.
 
 ## Configuration
 
@@ -184,7 +184,7 @@ from the anchor is used after a few seconds so the loading screen still clears.
 | `audioDelayMs`      | `0`                             | Shifts a baked video's sound relative to its picture in milliseconds. Positive plays the sound later. Only used when `audioInSamePlayer` is off - with one player for both streams they share a clock and need no delay. Tune by ear; a faster machine needs less, or a negative value.            |
 | `audioInSamePlayer` | `true`                          | Play the sound inside the video player: one clock, so no drift and no delay needed, and the decoder keeps the sound on time by dropping late video frames. Off = a separate audio-only player, which a slow video pipeline cannot starve; that player is also resynchronised to the picture automatically whenever it falls behind or runs ahead by more than a fraction of a second. |
 | `videoAudioDevice`  | *(empty - automatic)*           | Output device the video's sound plays through. Empty follows the system's default output - the same one the game's own sound uses. On Linux this is a sink name as shown by the desktop's audio widget (e.g. the name of your headphones); only when the system sound server is unreachable is it a Java Sound mixer name instead (the log lists them). |
-| `audioLatencyMs`    | `0`                             | Delays the picture by this many milliseconds relative to the sound pipeline's reported position - compensation for output latency the program cannot measure. Bluetooth headphones are the typical case (the whole audio chain buffers more sound than the device position admits, so the picture otherwise runs ahead of what is heard); they usually want 150-500. |
+| `audioLatencyMs`    | `0`                             | Fine-tuning on top of the output latency the mod measures by itself (on Linux through the sound server - Bluetooth headphones included). Positive delays the picture further, negative brings it forward. Usually `0`; only needed for an output that misreports its latency. |
 | `videoOpacity`      | `100`                           | Extra opacity multiplier on top of the video's alpha, applied in both scenes.                                                                                                                                                                                                                                              |
 | `videoFit`          | `COVER`                         | `COVER` (crop), `CONTAIN` (letterbox) or `STRETCH`, in both scenes.                                                                                                                                                                                                                                                |
 | `videoMaxFps`       | `60`                            | Upper bound for GPU texture uploads per second (both scenes), `0` = unlimited.                                                                                                                                                                                                                                   |
@@ -221,7 +221,7 @@ from the anchor is used after a few seconds so the loading screen still clears.
 | Option                                    | Default  | Description                                                                                                                                                                                          |
 | ----------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `loadingBackground.enabled`               | `true`   | Draw the intro video behind the vanilla loading bar instead of the plain red background. Off keeps the loading screen vanilla; the video then only starts (and fades in via `videoFadeInMs`) once loading has finished. |
-| `loadingBackground.fadeInMs`              | `500`    | Fade-in once the loading screen appears.                                                                                                                                                             |
+| `loadingBackground.fadeInMs`              | `0`      | Fade-in once the loading screen appears; `0` (default) cuts straight to the video.                                                                                    |
 | `loadingBackground.hideVanillaLogo`       | `true`   | Hides the vanilla MOJANG STUDIOS logo while the video is showing.                                                                                                                                    |
 | `loadingBackground.holdAtMs`              | `0`      | Frame of the video at which the loading scene freezes and waits for the game to finish loading; the intro continues from exactly that frame. `0` plays the whole clip during loading.                 |
 | `loadingBackground.loop`                  | `false`  | Off = hold the last frame, which leaves a static background for the loading bar.                                                                                                                     |
@@ -263,14 +263,15 @@ stay behind for the rest of the playback - heard as the sound lagging the pictur
 Inside one player the picture is paced against a single playback clock whose master is wall time: pauses
 freeze it, seeks re-anchor it, and it can neither stall nor race with whatever the sound output reports.
 An output whose device position can be fully accounted for (Java Sound's `SourceDataLine`) hands the clock
-to the sound instead, gluing picture and audio together sample-tightly; a sound server's reported latency
-cannot be trusted that far (after an underrun PipeWire's PulseAudio layer reports `0` forever), so there
-the sound plays best-effort under the wall clock. The demuxer additionally keeps ~400 ms of decoded audio
+to the sound instead, gluing picture and audio together sample-tightly. Through the sound server (Linux)
+each sound chunk is written when the wall clock reaches its timestamp, the stream keeps a fixed ~200 ms
+buffer, and the latency the server reports right after each write - the buffer plus the sink's own delay,
+such as a Bluetooth codec - is what the picture is delayed by, so both reach the user together. The demuxer additionally keeps ~400 ms of decoded audio
 ahead of the clock before its pacing may stall - without that cushion the audio stream runs empty at the
 first stutter and the sound cuts out - and when refilling it, far-ahead video frames are decoded but not
 converted or shown (the same frame-dropping a too-slow decoder causes, in the other direction).
 
-With `debugLogging: true` a heartbeat is logged every 5 s while a video is on screen (frame counters, alpha,
+With `debugLogging: true` a heartbeat is logged every 15 s while a video is on screen (frame counters, alpha,
 positions, scene flags). It exists so that a stalled scene is visible in the log: a freeze that leaves no
 other trace is otherwise impossible to tell apart from a log that simply ended.
 
@@ -278,7 +279,9 @@ Note that the sound can start a hair after the picture, but no longer by a notic
 output is opened **before playback** - during the silent preload, at volume 0 - instead of when the loading
 scene begins. An output that already exists only has to be fed; resuming it only means turning the volume
 up. Opening it late costs about a second of silence _and_ the same second of delay, which is what used to
-push the sound behind the picture.
+push the sound behind the picture. While the player is paused (the preload park, the loading hold) the
+stream keeps playing silence, so the sound server never suspends the sink - waking a Bluetooth sink again
+takes a second or two, which used to swallow the start of the sound.
 
 ### Video never shows up, or the game seems frozen
 

@@ -138,10 +138,9 @@ public class AuraIntroConfig implements ConfigData {
         public int audioDelayMs = 0;
 
         /**
-         * Compensation for output latency the program cannot measure, in milliseconds: it delays the
-         * picture by this amount relative to the position the sound pipeline reports. Raise it when
-         * the video runs ahead of what is actually heard - Bluetooth headphones are the typical case,
-         * where the whole audio chain buffers far more sound than the device position admits.
+         * Fine-tuning of the A/V sync, in milliseconds, on top of the output latency the player
+         * measures itself (on the Linux sound server path): positive delays the picture further,
+         * negative brings it forward. Meant for latency no output reports honestly.
          */
         @ConfigEntry.Gui.Tooltip
         @ConfigEntry.BoundedDiscrete(min = -1000, max = 2000)
@@ -315,10 +314,14 @@ public class AuraIntroConfig implements ConfigData {
         @ConfigEntry.Gui.Tooltip
         public boolean enabled = true;
 
-        /** Fade-in duration once the loading screen appears, in milliseconds. */
+        /**
+         * Fade-in duration once the loading screen appears, in milliseconds. 0 (the default) cuts
+         * straight to the video's first frame; the plain loading background shows only for the
+         * moments before that frame was decoded.
+         */
         @ConfigEntry.Gui.Tooltip
         @ConfigEntry.BoundedDiscrete(min = 0, max = 20000)
-        public int fadeInMs = 500;
+        public int fadeInMs = 0;
 
         /**
          * Hide the vanilla "MOJANG STUDIOS" logo while the video is showing, so the
@@ -356,7 +359,7 @@ public class AuraIntroConfig implements ConfigData {
          */
         @ConfigEntry.Gui.Tooltip
         @ConfigEntry.BoundedDiscrete(min = 0, max = 600000)
-        public int holdAtMs = 0;
+        public int holdAtMs = 3400;
     }
 
     // ------------------------------------------------------------------

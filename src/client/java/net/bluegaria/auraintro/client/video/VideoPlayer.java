@@ -53,18 +53,6 @@ public interface VideoPlayer {
     void setPaused(boolean paused);
 
     /**
-     * Runs a playback-time query on the player's own thread and hands the result to the consumer.
-     *
-     * <p>Meant for diagnostics: the returned value is the time the player itself is at (the
-     * displayed picture / the played sound), not the cached event value.</p>
-     *
-     * @param consumer receives the position in milliseconds, or {@code -1} when unknown
-     */
-    default void queryTimeMs(java.util.function.LongConsumer consumer) {
-        consumer.accept(-1L);
-    }
-
-    /**
      * Shifts this player's sound relative to its picture, in milliseconds (positive plays it later).
      * Only meaningful for an audio-only player: it is how the sound is lined up with a picture that a
      * separate player produces.
@@ -94,6 +82,15 @@ public interface VideoPlayer {
     /** True while a preloaded (paused, first frame decoded) session is waiting to be resumed. */
     default boolean isPreloaded() {
         return false;
+    }
+
+    /**
+     * True once a preloaded session is actually parked on the frame it exists to show (the first
+     * picture for a video player, the first sound chunk for an audio-only one), rather than still
+     * decoding it. Resuming any earlier would put nothing on screen.
+     */
+    default boolean isPreloadParked() {
+        return true;
     }
 
     /** Starts playback of a preloaded session. */

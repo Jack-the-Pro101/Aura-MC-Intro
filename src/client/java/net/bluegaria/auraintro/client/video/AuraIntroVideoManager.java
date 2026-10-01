@@ -21,10 +21,11 @@ import org.joml.Matrix3x2fStack;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-
 import java.nio.file.Path;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Drives the whole video intro: the loading scene's background, the hand-over to the title screen, the
@@ -44,6 +45,7 @@ import java.util.Optional;
 public final class AuraIntroVideoManager {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("Aura-Intro");
+    private static final Logger VIDEO_LOGGER = LoggerFactory.getLogger("Aura-Intro/Video");
 
     /** How many times starting the intro video is retried after a failed attempt. */
     private static final int MAX_SESSION_START_ATTEMPTS = 3;
@@ -59,6 +61,11 @@ public final class AuraIntroVideoManager {
     private static final long AUDIO_RESYNC_PERSIST_MS = 400L;
     /** Minimum time between resync seeks, so a stuttering machine cannot machine-gun the decoder. */
     private static final long AUDIO_RESYNC_COOLDOWN_MS = 1500L;
+
+    /** How long the hand-over may wait for the intro's first frames before the overlay is dropped anyway. */
+    private static final long HANDOVER_TIMEOUT_MS = 4000L;
+    /** How long a playing video may deliver no new frame before it counts as stalled. */
+    private static final long PLAYBACK_STALL_MS = 1500L;
 
     private static final AuraIntroVideoManager INSTANCE = new AuraIntroVideoManager();
 
@@ -135,7 +142,6 @@ public final class AuraIntroVideoManager {
     private long loadingFpsBaseline = -1L;
     private long loadingFpsBaselineMs;
     private long lastIntroFrameCount = -1L;
-    private static final long HANDOVER_TIMEOUT_MS = 4000L;
     private long lastIntroUploadCount = -1L;
     private long lastIntroUploadMs;
     /** One-shot intro playout rate check - see {@code updatePlaybackWatchdogs}. */
@@ -144,7 +150,6 @@ public final class AuraIntroVideoManager {
     private long introFpsBaselineMs;
     private long lastIntroProgressMs;
     private boolean introEndedEarly;
-    private static final long PLAYBACK_STALL_MS = 1500L;
     /** How often starting the intro video failed - see {@code onClientTick}. */
     private int sessionStartFailures;
     private long lastSessionFailureMs;
@@ -160,8 +165,8 @@ public final class AuraIntroVideoManager {
     private volatile long sessionGeneration;
     private boolean buttonAlphaRestorePending;
     private boolean textureFormatLogged;
-    /** Temporary: one line per hand-over step, so "what is on screen at the hand-over" is answerable. */
-    private final java.util.Set<String> tracedHandOverEvents = new java.util.HashSet<>();
+    /** Debug logging: one line per hand-over step, so "what is on screen at the hand-over" is answerable. */
+    private final Set<String> tracedHandOverEvents = new HashSet<>();
     /** One-shot diagnostic for "the title screen shows through the video" - see the guard below. */
     private boolean layerSkipReported;
 
@@ -191,8 +196,6 @@ public final class AuraIntroVideoManager {
     public void onClientTick(Minecraft minecraft) {
         guard("the client tick", () -> tick(minecraft));
     }
-
-    private static final Logger VIDEO_LOGGER = LoggerFactory.getLogger("Aura-Intro/Video");
 
     /** One-shot debug line when the menu music is first suppressed (see MusicManagerMixin). */
     public static void logMenuMusicSuppressed() {
@@ -249,8 +252,9 @@ public final class AuraIntroVideoManager {
                             + "decoding or scaling is stuck", Util.getMillis() - this.backgroundStartMs);
         }
 
-        // Pause the preloaded background video on its first frame. This is done here, on the client
-        // thread, because it must not be changed from inside the decoder's own threads.
+        // Pause the preloaded background video on its first frame. The player normally pauses
+        // itself the moment that frame exists (see FfmpegVideoPlayer's decode loop) - this stays
+        // as the fallback for a player that did not, and for the debug log line.
         if (this.backgroundPlayer.consumePauseAfterFirstFrame()) {
             this.backgroundPlayer.setPaused(true);
             if (cfg.general.debugLogging) {
@@ -264,12 +268,9 @@ public final class AuraIntroVideoManager {
         }
 
         if (this.audioPlayer.consumePauseAfterFirstFrame()) {
+            // Fallback like the one above: the audio-only preload parks itself on its first chunk,
+            // and holds its sound until it is resumed.
             this.audioPlayer.setPaused(true);
-            // Park the sound at the clip's start too. The video is seeked back to 0 when the loading scene
-            // begins (its preload ran ahead while the game started up); doing the same here, while the audio
-            // output is paused and its buffer empty, costs nothing - doing it at that moment instead made
-            // the sound re-prime right when it had to be audible, which pushed it behind the picture.
-            this.audioPlayer.seekMs(0L);
         }
 
         resyncAudioToPicture(cfg);
@@ -311,7 +312,6 @@ public final class AuraIntroVideoManager {
                         Util.getMillis() - this.anchorSetMs);
             }
         }
-
 
         Overlay overlay = McCompat.currentOverlay(minecraft);
         LoadingOverlay loadingOverlay = overlay instanceof LoadingOverlay candidate ? candidate : null;
@@ -564,7 +564,7 @@ public final class AuraIntroVideoManager {
             if (usesSeparateAudioPlayer(cfg)) {
                 // Silent again (volume 0) and paused on its first samples, so it cannot run ahead of the
                 // loading scene that will play it either.
-                this.audioPlayer.setAudioDevice(cfg.video.videoAudioDevice);
+                configureAudioPlayer(cfg);
                 this.audioPlayer.preload(path, 0);
             }
             synchronized (this) {
@@ -591,6 +591,15 @@ public final class AuraIntroVideoManager {
             return;
         }
         if (this.backgroundPlayer.isPreloaded()) {
+            if (!this.backgroundPlayer.isPreloadParked()
+                    && (this.loadingOverlayFirstSeenMs == 0L
+                        || Util.getMillis() - this.loadingOverlayFirstSeenMs < 5000L)) {
+                // The preload is still decoding its first frame. Resume it once it is actually
+                // parked on that frame - that is the whole point of the preload - and never mind a
+                // video that never produces one: after the timeout the resume goes ahead anyway
+                // (safe; the player disarms its self-pause when resumed).
+                return;
+            }
             this.backgroundPlayedOnce = true;
             this.backgroundStartMs = Util.getMillis();
             this.backgroundFrozen = false;
@@ -599,26 +608,23 @@ public final class AuraIntroVideoManager {
             this.backgroundAbandoned = false;
             this.lastBackgroundFrameCount = -1L;
             this.lastBackgroundProgressMs = this.backgroundStartMs;
-            // The silent preload keeps playing while the game finishes starting up, so it may have run
-            // well into the clip. Restart it at the beginning for the visible playback, otherwise the
-            // video (and its audio) would start half-way through. Seeking is unconditional: asking the
-            // player for its position here would be another native call on the client thread.
+            // The preload parks on its first frame by itself (the decode thread pauses as soon as
+            // that frame exists), so it is normally still at the very start of the clip. Should it
+            // ever have run noticeably ahead anyway, restart at the beginning for the visible
+            // playback - seeking flushes the decoder and briefly freezes the picture, so it is the
+            // safety net, not the normal path.
             long preloadPositionMs = this.backgroundPlayer.cachedTimeMs();
             boolean restartFromStart = preloadPositionMs > 300L;
             if (restartFromStart) {
-                // Only when the silent preload ran noticeably ahead (it starts playing as soon as the decoder
-                // has opened the file). Seeking flushes the decoder and briefly shows a black frame, so
-                // doing it unconditionally caused the visible flash between the preload frame and the
-                // real playback.
                 this.backgroundPlayer.seekMs(0L);
             }
-            this.backgroundPlayer.resumeFromPreload();
-            // The volume was forced to 0 for the silent preload - apply the configured one now that
-            // the video is actually on screen.
+            // The volume was forced to 0 for the silent preload - apply the configured one before
+            // resuming, so the very first chunk the audio thread writes is already audible.
             this.backgroundPlayer.setVolume(cfg.video.videoVolume);
+            this.backgroundPlayer.resumeFromPreload();
             if (usesSeparateAudioPlayer(cfg)) {
-                this.audioPlayer.resumeFromPreload();
                 this.audioPlayer.setVolume(cfg.video.videoVolume);
+                this.audioPlayer.resumeFromPreload();
                 this.audioPlayer.setAudioDelayMs(cfg.video.audioDelayMs);
                 if (cfg.video.audioDelayMs != 0 && cfg.general.debugLogging) {
                     LOGGER.info("Shifting the sound by {} ms to line it up with the picture",
@@ -656,7 +662,7 @@ public final class AuraIntroVideoManager {
             this.backgroundPlayer.setAudioDevice(cfg.video.videoAudioDevice);
             boolean ok = this.backgroundPlayer.start(path, cfg.video.videoVolume);
             if (ok && usesSeparateAudioPlayer(cfg)) {
-                this.audioPlayer.setAudioDevice(cfg.video.videoAudioDevice);
+                configureAudioPlayer(cfg);
                 this.audioPlayer.start(path, cfg.video.videoVolume);
             }
             if (this.backgroundGeneration != generation) {
@@ -677,6 +683,12 @@ public final class AuraIntroVideoManager {
         }, "Aura-Intro-Background-Init");
         thread.setDaemon(true);
         thread.start();
+    }
+
+    /** Applies the config to the separate sound player before it opens its file. */
+    private void configureAudioPlayer(AuraIntroConfig cfg) {
+        this.audioPlayer.setDebugLogging(cfg.general.debugLogging);
+        this.audioPlayer.setAudioDevice(cfg.video.videoAudioDevice);
     }
 
     /** Freezes on the last frame (default) or loops, depending on the config. */
@@ -771,6 +783,11 @@ public final class AuraIntroVideoManager {
                 || this.loadingLayerRetired || graphics == null || player == null) {
             return;
         }
+        // The loading screen renders before the client's first tick (and its first tick can trail
+        // the window by a second of start-up work), and the parked preload - sound included -
+        // should resume the moment it can, not one tick later than that. The draw path runs on
+        // the same thread as the tick, and starting is idempotent, so this only makes it earlier.
+        maybeStartLoadingBackground(cfg);
         if (!this.backgroundActive && !hasFrame(player)) {
             return;
         }
@@ -851,6 +868,11 @@ public final class AuraIntroVideoManager {
             this.audioPlayer.setVolume(cfg.video.videoVolume);
             this.audioPlayer.setAudioDelayMs(cfg.video.audioDelayMs);
             this.audioPlayer.setPaused(false);
+            // The intro continues from wherever the shared player is - including the frame the
+            // loading scene froze on (holdAtMs): that freeze pauses the very player that now has
+            // to keep playing, and this is the only place that releases it. A no-op whenever
+            // nothing paused it.
+            this.player.setPaused(false);
             reportSync("title screen");
             if (cfg.general.debugLogging) {
                 LOGGER.info("Video intro continues from the held frame ({} ms)",
@@ -868,6 +890,7 @@ public final class AuraIntroVideoManager {
             this.failed = true;
         }
     }
+
     /**
      * Replicates what vanilla does when its own fade-out finishes: finish the reload (reporting any
      * load failure) and drop the overlay immediately.
@@ -903,8 +926,6 @@ public final class AuraIntroVideoManager {
         }
     }
 
-
-
     /** Starts the decoder on a background thread so the first real frame never blocks loading. */
     private boolean beginSession(AuraIntroConfig cfg) {
         Path path = VideoAssets.resolveVideo(cfg);
@@ -930,7 +951,7 @@ public final class AuraIntroVideoManager {
             if (usesSeparateAudioPlayer(cfg)) {
                 // Reached when a baked video is retried (normally its sound is already playing): restart it
                 // with the video so both stay together.
-                this.audioPlayer.setAudioDevice(cfg.video.videoAudioDevice);
+                configureAudioPlayer(cfg);
                 this.audioPlayer.start(path, cfg.video.videoVolume);
                 this.audioPlayer.setAudioDelayMs(cfg.video.audioDelayMs);
             }
@@ -1172,26 +1193,19 @@ public final class AuraIntroVideoManager {
         }
     }
 
+    /** True when a baked video's sound is played by its own player rather than by the video player. */
+    private static boolean usesSeparateAudioPlayer(AuraIntroConfig cfg) {
+        return isBakedVideo(cfg) && !cfg.video.audioInSamePlayer;
+    }
+
     /**
-     * Reports where the picture and the sound are, as the backend reports them (debug logging only).
-     *
-     * <p>The two are separate players, so their own positions are the honest way to see how far apart they
-     * are. The sound lagging comes from the audio output's own start-up latency, which differs from launch
-     * to launch - which is why no fixed offset ever fit.</p>
-     */
-    /**
-     * Periodic debug line while a video is on screen (every 5 s).
+     * Periodic debug line while a video is on screen (every 15 s).
      *
      * <p>Written so that a stalled scene is visible in the log: the frame counters say whether frames are
      * still produced and drawn, the alpha says whether the scene is fading, and the positions say whether
      * the two players are drifting apart. A freeze that leaves no other trace at all is otherwise
      * impossible to tell apart from a log that simply ended.</p>
      */
-    /** True when a baked video's sound is played by its own player rather than by the video player. */
-    private static boolean usesSeparateAudioPlayer(AuraIntroConfig cfg) {
-        return isBakedVideo(cfg) && !cfg.video.audioInSamePlayer;
-    }
-
     private void logHeartbeat(AuraIntroConfig cfg) {
         if (!cfg.general.debugLogging) {
             return;
@@ -1213,20 +1227,24 @@ public final class AuraIntroVideoManager {
                 this.backgroundActive, this.sessionActive, this.backgroundFrozen, this.ended);
     }
 
+    /**
+     * Reports where the picture and a separate sound player are, as each reports itself (debug
+     * logging only) - the honest way to see how far apart two players with two clocks are.
+     */
     private void reportSync(String where) {
         if (!AuraIntroConfigHolder.get().general.debugLogging
                 || (!this.sessionActive && !this.backgroundActive)) {
             return;
         }
-        this.player.queryTimeMs(pictureMs -> this.audioPlayer.queryTimeMs(soundMs -> {
-            if (pictureMs < 0L || soundMs < 0L) {
-                return;
-            }
-            long difference = soundMs - pictureMs;
-            LOGGER.info("A/V at {}: picture {} ms, sound {} ms (sound {} ms {} the picture)",
-                    where, pictureMs, soundMs, Math.abs(difference),
-                    difference > 0L ? "ahead of" : "behind");
-        }));
+        long pictureMs = this.player.cachedTimeMs();
+        long soundMs = this.audioPlayer.cachedTimeMs();
+        if (pictureMs < 0L || soundMs < 0L) {
+            return;
+        }
+        long difference = soundMs - pictureMs;
+        LOGGER.info("A/V at {}: picture {} ms, sound {} ms (sound {} ms {} the picture)",
+                where, pictureMs, soundMs, Math.abs(difference),
+                difference > 0L ? "ahead of" : "behind");
     }
 
     /**
@@ -1402,10 +1420,6 @@ public final class AuraIntroVideoManager {
     }
 
     /**
-     * Alpha the title screen buttons should have, or {@code -1} when vanilla's own fade should
-     * be used instead.
-     */
-    /**
      * Fade factor for the title screen's texts - the version/mod-count line and the splash - or {@code -1}
      * when they are left to vanilla.
      *
@@ -1537,6 +1551,10 @@ public final class AuraIntroVideoManager {
         return vanillaAlpha * fadeSince(this.logoFadeStartMs, cfg.timing.textFadeInDurationMs);
     }
 
+    /**
+     * Alpha the title screen buttons should have, or {@code -1} when vanilla's own fade should
+     * be used instead.
+     */
     public float buttonAlphaOverride() {
         AuraIntroConfig cfg = AuraIntroConfigHolder.get();
         return timelineFadeFactor(cfg.timing.buttonsFadeInAtMs, cfg.timing.buttonsFadeInDurationMs);
@@ -1566,11 +1584,20 @@ public final class AuraIntroVideoManager {
         return Mth.clamp(alpha, 0.0F, 1.0F);
     }
 
-    /** True while the loading background video covers the vanilla loading screen. */
+    /**
+     * True while the vanilla MOJANG STUDIOS logo should stay off the loading screen.
+     *
+     * <p>That includes the very first frames of a loading screen that is about to show the video,
+     * before the video's first frame has arrived: the logo popping in for a frame or two only to be
+     * covered by the video a moment later looks like a glitch. {@code loadingLayerRetired} keeps
+     * this off for reload splashes that do not replay the video - there the vanilla screen, logo
+     * included, is exactly what should show - and lets the logo draw again once the hand-over to
+     * the title screen retired the loading scene's layer.</p>
+     */
     public boolean shouldHideLoadingLogo() {
         AuraIntroConfig cfg = AuraIntroConfigHolder.get();
         return cfg.general.enabled && cfg.loadingBackground.enabled && cfg.loadingBackground.hideVanillaLogo
-                && this.backgroundActive && !this.backgroundFailed;
+                && !this.loadingLayerRetired && !this.backgroundFailed;
     }
 
     public boolean shouldHideSplashText() {
@@ -1665,7 +1692,6 @@ public final class AuraIntroVideoManager {
     // ------------------------------------------------------------------
 
     /**
-    /**
      * Title screen, before its widgets: draws whichever layer belongs to the current scene.
      *
      * <p>Before the hand-over that is the loading scene's layer - the title screen is rendered underneath
@@ -1751,15 +1777,6 @@ public final class AuraIntroVideoManager {
         }
         return uploaded;
     }
-
-    /**
-     * Computes the destination rectangle plus the texture coordinates. The aspect ratio passed in
-     * is that of the real video track; the whole (possibly padded) texture is mapped onto it.
-     *
-     * @return {x0, y0, x1, y1, u0, u1, v0, v1}
-     */
-
-
 
     private static boolean isLoadReady(LoadingOverlay overlay) {
         LoadingOverlayAccessor accessor = (LoadingOverlayAccessor) overlay;

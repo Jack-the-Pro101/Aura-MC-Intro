@@ -4,6 +4,9 @@ import com.mojang.blaze3d.platform.NativeImage;
 import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.renderer.texture.DynamicTexture;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.nio.ByteBuffer;
 
 /**
@@ -16,6 +19,11 @@ import java.nio.ByteBuffer;
  * from the texture itself; older versions take it alongside the buffer.</p>
  */
 final class VideoTextureUploader {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger("Aura-Intro/Video");
+
+    private static boolean directUploadBroken;
+
     private VideoTextureUploader() {
     }
 
@@ -27,13 +35,23 @@ final class VideoTextureUploader {
      * only a safety net, in case a future Minecraft version breaks this one again
      */
     static boolean uploadRgba(DynamicTexture texture, ByteBuffer frame, int width, int height) {
-        //? if >=26.2 {
-        RenderSystem.getDevice().createCommandEncoder().writeToTexture(
-                texture.getTexture(), frame, 0, 0, 0, 0, width, height);
-        //?} else {
-        /*RenderSystem.getDevice().createCommandEncoder().writeToTexture(
-                texture.getTexture(), frame, NativeImage.Format.RGBA, 0, 0, 0, 0, width, height);
-        *///?}
-        return true;
+        if (directUploadBroken) {
+            return false;
+        }
+        try {
+            //? if >=26.2 {
+            RenderSystem.getDevice().createCommandEncoder().writeToTexture(
+                    texture.getTexture(), frame, 0, 0, 0, 0, width, height);
+            //?} else {
+            /*RenderSystem.getDevice().createCommandEncoder().writeToTexture(
+                    texture.getTexture(), frame, NativeImage.Format.RGBA, 0, 0, 0, 0, width, height);
+            *///?}
+            return true;
+        } catch (RuntimeException e) {
+            // Render thread only, so a plain field is enough: stop trying after the first failure.
+            directUploadBroken = true;
+            LOGGER.warn("Direct texture upload failed - using the slower copying upload from now on", e);
+            return false;
+        }
     }
 }

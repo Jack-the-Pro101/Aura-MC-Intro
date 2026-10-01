@@ -36,6 +36,16 @@ interface AudioOutput {
 
     void start();
 
+    /**
+     * Called over and over by the audio thread while the player is paused. An output that needs
+     * to keep its device busy (see {@link PulseAudioOutput#idle()}) writes a short stretch of
+     * silence here, blocking like {@link #write(byte[])}; returns whether it did, so the caller
+     * knows whether it has to sleep itself.
+     */
+    default boolean idle() {
+        return false;
+    }
+
     void stop();
 
     /** Discards the queued samples - used when the playback position jumps (a seek). */
@@ -43,8 +53,19 @@ interface AudioOutput {
 
     void close();
 
-    /** Updates the sample-scaling factor; picked up by the next written chunk. */
+    /**
+     * Updates the sample-scaling factor; picked up by the next written chunk.
+     */
     void setVolume(float volume);
+
+    /**
+     * The depth of the output's own buffering, in milliseconds - how long a written sample travels
+     * before it is audible. Outputs whose {@link #mediaPositionUs()} already reflects this (a
+     * device position) do not need it and report 0.
+     */
+    default int nominalLatencyMs() {
+        return 0;
+    }
 
     /**
      * Whether {@link #mediaPositionUs()} is a trustworthy playback clock to pace the picture
