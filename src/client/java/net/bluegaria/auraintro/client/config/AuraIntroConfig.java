@@ -201,7 +201,7 @@ public class AuraIntroConfig implements ConfigData {
          */
         @ConfigEntry.Gui.Tooltip
         @ConfigEntry.BoundedDiscrete(min = 0, max = 20000)
-        public int videoFadeInMs = 400;
+        public int videoFadeInMs = 0;
 
         /**
          * Video timestamp at which the vanilla progress bar starts fading away. The Mojang
@@ -268,7 +268,7 @@ public class AuraIntroConfig implements ConfigData {
         /** Loop region start, in milliseconds. Only used by {@link EndBehaviour#LOOP_REGION}. */
         @ConfigEntry.Gui.Tooltip
         @ConfigEntry.BoundedDiscrete(min = 0, max = 600000)
-        public int loopStartMs = 0;
+        public int loopStartMs = 7480;
 
         /**
          * Loop region end, in milliseconds. 0 means "end of the video". Only used by
@@ -276,7 +276,7 @@ public class AuraIntroConfig implements ConfigData {
          */
         @ConfigEntry.Gui.Tooltip
         @ConfigEntry.BoundedDiscrete(min = 0, max = 600000)
-        public int loopEndMs = 0;
+        public int loopEndMs = 16280;
 
         /**
          * Keeps the loop region as the title screen's background for the rest of the session: leaving
@@ -315,7 +315,7 @@ public class AuraIntroConfig implements ConfigData {
          */
         @ConfigEntry.Gui.Tooltip
         @ConfigEntry.BoundedDiscrete(min = -1, max = 4)
-        public int buttonsGuiScale = -1;
+        public int buttonsGuiScale = 0;
 
         /**
          * When enabled, the vanilla 2 second button fade-in is left untouched and the
