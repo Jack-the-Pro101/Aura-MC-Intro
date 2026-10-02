@@ -139,6 +139,23 @@ public final class AuraIntroVideoManager {
     private long badgeFirstSeenMs;
     /** When the last video session ended, which is when the wordmark starts fading in. */
     private long logoFadeStartMs;
+    /**
+     * Set the first time a LOOP_REGION intro wraps around (or is parked off the title screen before
+     * that): from then on the video is a silent background and the menu music has the floor.
+     */
+    private boolean loopedOnce;
+    /** True while a persistent loop is paused because the title screen is not showing. */
+    private boolean parkedAway;
+    /** True while a persistent loop plays behind another menu (see loopInOtherMenus). */
+    private boolean loopInMenus;
+    /** Whether the title screen was showing at the last tick: only it is sure to draw the video every frame. */
+    private boolean onTitleScreen;
+    /** One-shot request for the menu music to start on its next tick (see consumeMenuMusicStart). */
+    private volatile boolean menuMusicStartPending;
+    /** Scale of the title screen being drawn right now, or -1 outside a scaled pass (see drawScaledTitleScreen). */
+    private float titlePassFactor = -1.0F;
+    private int titlePassWidth;
+    private int titlePassHeight;
     private long loadingFpsBaseline = -1L;
     private long loadingFpsBaselineMs;
     private long lastIntroFrameCount = -1L;
@@ -215,11 +232,25 @@ public final class AuraIntroVideoManager {
         if (!cfg.general.enabled || !cfg.general.suppressMenuMusic) {
             return false;
         }
+        // Once a loop has wrapped around, the video is a silent background and the music takes over.
         boolean introPlaying = (this.sessionActive || this.startRequested)
-                && !this.ended && !this.player.isFinished();
+                && !this.ended && !this.player.isFinished() && !this.loopedOnce;
         boolean backgroundPlaying = (this.backgroundActive || this.backgroundStartRequested)
                 && !this.backgroundPlayer.isFinished();
         return introPlaying || backgroundPlaying;
+    }
+
+    /**
+     * True once, right after a loop took the sound over from the video: {@link
+     * net.bluegaria.auraintro.mixin.client.MusicManagerMixin} then starts the menu music on that tick
+     * instead of waiting out vanilla's countdown (up to several seconds after a launch).
+     */
+    public boolean consumeMenuMusicStart() {
+        if (!this.menuMusicStartPending) {
+            return false;
+        }
+        this.menuMusicStartPending = false;
+        return true;
     }
 
     private void tick(Minecraft minecraft) {
@@ -366,11 +397,128 @@ public final class AuraIntroVideoManager {
             handleEndBehaviour(cfg);
         }
 
-        // Leaving the title screen (options, world select, ...) ends the intro for good.
+        // Leaving the title screen (options, world select, ...) ends the intro for good - unless a
+        // persistent loop is configured, which only pauses until the title screen is back. No screen at
+        // all with a world loaded is in-game; no screen without one is the start-up, before the title
+        // screen exists.
         Screen currentScreen = McCompat.currentScreen(minecraft);
-        if (currentScreen != null && !(currentScreen instanceof TitleScreen)) {
+        boolean awayFromTitle = currentScreen != null
+                ? !(currentScreen instanceof TitleScreen)
+                : minecraft.level != null;
+        this.onTitleScreen = !awayFromTitle;
+        boolean inMenus = awayFromTitle && minecraft.level == null && cfg.timing.loopInOtherMenus;
+        if (awayFromTitle && !persistsLoop(cfg)) {
             stopSession(minecraft);
+        } else if (awayFromTitle && !inMenus) {
+            this.loopInMenus = false;
+            parkLoop(cfg);
+        } else {
+            if (inMenus && !this.loopInMenus) {
+                // Leaving the title screen ends the intro's part here too: the loop carries on as the
+                // menus' silent background.
+                this.loopInMenus = true;
+                enterSilentLoop(cfg);
+            } else if (!inMenus) {
+                this.loopInMenus = false;
+            }
+            if (this.parkedAway) {
+                resumeParkedLoop(cfg);
+            }
         }
+    }
+
+    /**
+     * Another menu's background, where vanilla draws its panorama: the loop, while it plays behind the
+     * menus ({@code loopInOtherMenus}).
+     *
+     * @return whether it drew - the caller then ends the stratum, so the menu's blur covers the video
+     *         like it covers the panorama (vanilla blurs only the strata before the one it blurs in)
+     */
+    public boolean drawMenuBackgroundVideo(GuiGraphicsExtractor graphics) {
+        if (!this.loopInMenus || !this.sessionActive || !this.introVisible) {
+            return false;
+        }
+        drawIntroVideo(graphics);
+        return true;
+    }
+
+    /** Whether the loop region stays the title screen's background across screen changes. */
+    private static boolean persistsLoop(AuraIntroConfig cfg) {
+        return cfg.timing.endBehaviour == AuraIntroConfig.EndBehaviour.LOOP_REGION
+                && cfg.timing.persistLoopAsBackground;
+    }
+
+    /**
+     * The intro's part is over: the video becomes a silent background (it keeps looping, muted) and the
+     * menu music starts right away. Reached the first time the loop wraps around, or when the title
+     * screen is left before that with a persistent loop.
+     */
+    private void enterSilentLoop(AuraIntroConfig cfg) {
+        if (this.loopedOnce) {
+            return;
+        }
+        this.loopedOnce = true;
+        this.player.setVolume(0);
+        if (usesSeparateAudioPlayer(cfg)) {
+            this.audioPlayer.setVolume(0);
+        }
+        this.menuMusicStartPending = cfg.general.suppressMenuMusic;
+        if (cfg.general.wordmarkAfterFirstLoop) {
+            // A loop never ends, so this is the "after the video" the wordmark waits for.
+            this.logoFadeStartMs = Util.getMillis();
+        }
+        if (cfg.general.debugLogging) {
+            LOGGER.info("Video looped for the first time - muting it and starting the menu music");
+        }
+    }
+
+    /** Pauses a persistent loop while the title screen is not showing (see persistLoopAsBackground). */
+    private void parkLoop(AuraIntroConfig cfg) {
+        if (this.parkedAway) {
+            return;
+        }
+        this.parkedAway = true;
+        // Leaving the title screen ends the intro's part even if the loop never wrapped yet: from here
+        // on it is a background, and the menu music plays in the other menus and the game as usual.
+        enterSilentLoop(cfg);
+        this.player.setPaused(true);
+        if (usesSeparateAudioPlayer(cfg)) {
+            this.audioPlayer.setPaused(true);
+        }
+        if (cfg.general.debugLogging) {
+            LOGGER.info("Left the title screen - pausing the loop until it is back");
+        }
+    }
+
+    /** The title screen is back: carry on with the loop, inside the loop region. */
+    private void resumeParkedLoop(AuraIntroConfig cfg) {
+        this.parkedAway = false;
+        if (this.player.timeMs() < cfg.timing.loopStartMs) {
+            // Left before the playback reached the loop region: the background is the loop, not the
+            // rest of the intro.
+            this.player.seekMs(cfg.timing.loopStartMs);
+        }
+        this.player.setPaused(false);
+        if (usesSeparateAudioPlayer(cfg)) {
+            this.audioPlayer.setPaused(false);
+        }
+        restartIntroWatchdogs();
+        if (cfg.general.debugLogging) {
+            LOGGER.info("Back on the title screen - resuming the loop");
+        }
+    }
+
+    /**
+     * Gives the intro's stall watchdogs a fresh start: after a seek or a pause nothing has had a chance
+     * to arrive yet, and a verdict from before it says nothing about the playback from here on.
+     */
+    private void restartIntroWatchdogs() {
+        long now = Util.getMillis();
+        this.introEndedEarly = false;
+        this.lastIntroFrameCount = -1L;
+        this.lastIntroProgressMs = now;
+        this.lastIntroUploadCount = -1L;
+        this.lastIntroUploadMs = now;
     }
 
     /**
@@ -549,6 +697,7 @@ public final class AuraIntroVideoManager {
         if (path == null) {
             return;
         }
+        replaceClosedPlayers();
         // The loading scene is a background: dropping its alpha happens on the decode thread, which
         // is far cheaper than masking every 4K frame on the render thread.
         this.backgroundPlayer.sink().setForceOpaque(true);
@@ -655,18 +804,22 @@ public final class AuraIntroVideoManager {
         this.backgroundFrozen = false;
         this.backgroundFramesUploaded = 0L;
         long generation = ++this.backgroundGeneration;
+        replaceClosedPlayers();
+        VideoPlayer background = this.backgroundPlayer;
+        // A background, like the preloaded one (see preloadLoadingBackground) - which a replay replaces.
+        background.sink().setForceOpaque(true);
         Thread thread = new Thread(() -> {
-            this.backgroundPlayer.setDebugLogging(cfg.general.debugLogging);
-            this.backgroundPlayer.setHardwareDecoding(cfg.video.hardwareDecoding);
-            this.backgroundPlayer.setAudioLatencyMs(cfg.video.audioLatencyMs);
-            this.backgroundPlayer.setAudioDevice(cfg.video.videoAudioDevice);
-            boolean ok = this.backgroundPlayer.start(path, cfg.video.videoVolume);
+            background.setDebugLogging(cfg.general.debugLogging);
+            background.setHardwareDecoding(cfg.video.hardwareDecoding);
+            background.setAudioLatencyMs(cfg.video.audioLatencyMs);
+            background.setAudioDevice(cfg.video.videoAudioDevice);
+            boolean ok = background.start(path, cfg.video.videoVolume);
             if (ok && usesSeparateAudioPlayer(cfg)) {
                 configureAudioPlayer(cfg);
                 this.audioPlayer.start(path, cfg.video.videoVolume);
             }
             if (this.backgroundGeneration != generation) {
-                this.backgroundPlayer.close();
+                background.close();
                 return;
             }
             synchronized (this) {
@@ -942,12 +1095,14 @@ public final class AuraIntroVideoManager {
             LOGGER.info("Video intro continues from {} ms of the baked video", startAtMs);
         }
         long generation = ++this.sessionGeneration;
+        replaceClosedPlayers();
+        VideoPlayer player = this.player;
         Thread thread = new Thread(() -> {
-            this.player.setDebugLogging(cfg.general.debugLogging);
-            this.player.setHardwareDecoding(cfg.video.hardwareDecoding);
-            this.player.setAudioLatencyMs(cfg.video.audioLatencyMs);
-            this.player.setAudioDevice(cfg.video.videoAudioDevice);
-            boolean ok = this.player.start(path, cfg.video.videoVolume);
+            player.setDebugLogging(cfg.general.debugLogging);
+            player.setHardwareDecoding(cfg.video.hardwareDecoding);
+            player.setAudioLatencyMs(cfg.video.audioLatencyMs);
+            player.setAudioDevice(cfg.video.videoAudioDevice);
+            boolean ok = player.start(path, cfg.video.videoVolume);
             if (usesSeparateAudioPlayer(cfg)) {
                 // Reached when a baked video is retried (normally its sound is already playing): restart it
                 // with the video so both stay together.
@@ -958,14 +1113,14 @@ public final class AuraIntroVideoManager {
             if (ok && startAtMs > 0L) {
                 // Seeking on the player's own thread, before the intro is shown, so its timeline (which
                 // starts with the first displayed frame) is relative to the baked intro.
-                this.player.seekMs(startAtMs);
+                player.seekMs(startAtMs);
                 if (isBakedVideo(cfg)) {
                     this.audioPlayer.seekMs(startAtMs);
                 }
             }
             if (this.sessionGeneration != generation) {
                 // The session was torn down while the decoder was still starting up.
-                this.player.close();
+                player.close();
                 return;
             }
             synchronized (this) {
@@ -998,6 +1153,10 @@ public final class AuraIntroVideoManager {
                     long loopEnd = cfg.timing.loopEndMs > 0 ? cfg.timing.loopEndMs : this.player.lengthMs();
                     if (this.introEnded() || (loopEnd > 0L && this.player.timeMs() >= loopEnd)) {
                         this.player.seekMs(cfg.timing.loopStartMs);
+                        // A watchdog that tripped at the end would otherwise keep introEnded() true
+                        // and seek back to the loop start on every tick from here on.
+                        restartIntroWatchdogs();
+                        enterSilentLoop(cfg);
                     }
                 }
                 case FADE_OUT_TO_PANORAMA -> {
@@ -1044,6 +1203,27 @@ public final class AuraIntroVideoManager {
      * Tears the intro session down and starts it again from the beginning. Used when the player started
      * without ever producing a frame.
      */
+    /**
+     * A closed player can never be opened again - its teardown runs on a thread of its own - so a
+     * restart or a replay starts on a fresh player of the same kind in its place. One player serving
+     * both scenes of a baked video stays one player.
+     */
+    private void replaceClosedPlayers() {
+        if (this.player.isClosed()) {
+            VideoPlayer fresh = this.player.fresh();
+            if (this.backgroundPlayer == this.player) {
+                this.backgroundPlayer = fresh;
+            }
+            this.player = fresh;
+        }
+        if (this.backgroundPlayer.isClosed()) {
+            this.backgroundPlayer = this.backgroundPlayer.fresh();
+        }
+        if (this.audioPlayer.isClosed()) {
+            this.audioPlayer = this.audioPlayer.fresh();
+        }
+    }
+
     private void restartIntroSession(Minecraft minecraft, AuraIntroConfig cfg) {
         LoadingOverlay anchored = this.anchoredOverlay;
         stopSession(minecraft);
@@ -1083,6 +1263,9 @@ public final class AuraIntroVideoManager {
         this.frozen = false;
         this.failed = false;
         this.endFadeStartMs = -1L;
+        this.loopedOnce = false;
+        this.parkedAway = false;
+        this.loopInMenus = false;
         if (minecraft != null) {
             this.introTexture.release(minecraft.getTextureManager());
         }
@@ -1321,7 +1504,7 @@ public final class AuraIntroVideoManager {
             }
         }
 
-        if (this.sessionActive && this.introVisible && !this.ended) {
+        if (this.sessionActive && this.introVisible && !this.ended && !this.parkedAway) {
             long produced = this.player.sink().producedFrames();
             if (produced != this.lastIntroFrameCount) {
                 this.lastIntroFrameCount = produced;
@@ -1338,7 +1521,9 @@ public final class AuraIntroVideoManager {
             // What the player actually sees is the uploaded texture, not the frames the decoder produces: if
             // the uploads stop while the vout keeps producing, the picture freezes silently and nothing
             // would ever end the intro. Watch the uploads too and end the scene on a stall there.
-            if (this.introFramesUploaded != this.lastIntroUploadCount) {
+            if (this.introFramesUploaded != this.lastIntroUploadCount || !this.onTitleScreen) {
+                // Only the title screen is sure to draw the video every frame: behind another menu a
+                // screen without a background uploads nothing, and that is not a stall.
                 this.lastIntroUploadCount = this.introFramesUploaded;
                 this.lastIntroUploadMs = now;
             } else if (!this.introEndedEarly
@@ -1539,7 +1724,8 @@ public final class AuraIntroVideoManager {
             // Waiting for the hand-over.
             return 0.0F;
         }
-        if (this.sessionActive && this.endFadeStartMs < 0L && !this.frozen) {
+        boolean loopTookOver = this.loopedOnce && cfg.general.wordmarkAfterFirstLoop;
+        if (this.sessionActive && this.endFadeStartMs < 0L && !this.frozen && !loopTookOver) {
             // Still playing normally. Once it ends - the fade-out starting, or the freeze frame - the
             // wordmark fades in alongside, which is the whole point of this option.
             return 0.0F;
@@ -1605,86 +1791,128 @@ public final class AuraIntroVideoManager {
     }
 
     /**
-     * The factor the title screen widgets are drawn scaled by, or {@code -1} when they should not be
-     * scaled at all (mod off, not the title screen, or the configured scale already equals the one
-     * the game runs at).
+     * The GUI scale the title screen should be laid out and drawn at, or {@code -1} when it simply runs at
+     * the game's own GUI scale (mod off, option at {@code -1}, or the configured scale resolving to the one
+     * the game already uses).
      *
      * <p>The configured value uses vanilla's own GUI scale semantics: an integer, resolved through
-     * {@code Window.calculateScale} exactly like the game's "GUI Scale" option does it (which also
-     * clamps it to what the window supports, and treats {@code 0} as "Auto"). The returned factor is
-     * that scale relative to the scale the rest of the UI runs at, so the buttons end up exactly as
-     * vanilla would draw them at that scale - pixel for pixel.</p>
+     * {@code Window.calculateScale} exactly like the game's "GUI Scale" option does it (which also clamps it
+     * to what the window supports, and treats {@code 0} as "Auto").</p>
      */
-    public float buttonScaleFactorFor(Screen screen) {
+    private static int titleScreenGuiScale() {
         AuraIntroConfig cfg = AuraIntroConfigHolder.get();
-        if (!cfg.general.enabled || !(screen instanceof TitleScreen) || cfg.layout.buttonsGuiScale < 0) {
+        if (!cfg.general.enabled || cfg.layout.buttonsGuiScale < 0) {
+            return -1;
+        }
+        Minecraft minecraft = Minecraft.getInstance();
+        Window window = minecraft.getWindow();
+        int scale = window.calculateScale(cfg.layout.buttonsGuiScale, minecraft.isEnforceUnicode());
+        return scale == window.getGuiScale() ? -1 : scale;
+    }
+
+    /**
+     * Called at the start of {@code TitleScreen.init()}: gives the screen the size it would have at the
+     * configured GUI scale, so vanilla's own layout code places everything - buttons, wordmark, splash,
+     * version line, copyright, Realms badge - exactly where the game itself would at that scale.
+     *
+     * @param wasScaled whether the screen's current size came from an earlier scaled layout (it is then put
+     *                  back to the window's size when no scale applies any more - {@code rebuildWidgets()}
+     *                  re-runs {@code init()} without resetting the size first)
+     * @return the factor to draw the screen with (see {@link #titleScreenScaleFactor}), or {@code -1}
+     */
+    public static float layOutTitleScreen(Screen screen, boolean wasScaled) {
+        Window window = Minecraft.getInstance().getWindow();
+        int scale = titleScreenGuiScale();
+        if (scale <= 0) {
+            if (wasScaled) {
+                screen.width = window.getGuiScaledWidth();
+                screen.height = window.getGuiScaledHeight();
+            }
             return -1.0F;
         }
-        Window window = Minecraft.getInstance().getWindow();
-        int buttonScale = window.calculateScale(cfg.layout.buttonsGuiScale, false);
-        float factor = buttonScale / (float) window.getGuiScale();
-        return Math.abs(factor - 1.0F) < 1.0E-4F ? -1.0F : factor;
+        screen.width = guiScaledSize(window.getWidth(), scale);
+        screen.height = guiScaledSize(window.getHeight(), scale);
+        return scale / (float) window.getGuiScale();
+    }
+
+    /** {@code Window.setGuiScale}'s rounding: a partial GUI pixel at the edge still counts as one. */
+    private static int guiScaledSize(int framebufferSize, int scale) {
+        return (framebufferSize + scale - 1) / scale;
+    }
+
+    /**
+     * The factor a screen's own GUI pixels are drawn at relative to the game's GUI pixels, or {@code -1} when
+     * it is not scaled. Only the title screen ever is, and always with the factor its current layout was
+     * made for.
+     */
+    public static float titleScreenScaleFactor(Screen screen) {
+        return screen instanceof ScaledTitleScreen scaled ? scaled.auraintro$guiScaleFactor() : -1.0F;
+    }
+
+    /** Draws a screen with the mouse position it is given (see {@link #drawScaledTitleScreen}). */
+    @FunctionalInterface
+    public interface ScaledTitleDraw {
+        void draw(int mouseX, int mouseY);
+    }
+
+    /**
+     * Draws the title screen at its own GUI scale: scales the pose, hands the drawing the mouse position in
+     * the screen's own GUI pixels, and until it returns {@code guiWidth()} / {@code guiHeight()} report the
+     * screen's own size (what vanilla reports at that GUI scale - tooltips are kept on screen with it).
+     *
+     * <p>Two ways lead here: the normal frame ({@code extractRenderStateWithTooltipAndSubtitles}, which
+     * includes the tooltips drawn after the screen) and a screen that draws the title screen behind itself
+     * by calling {@code extractRenderState} directly (the Friends overlay). Whichever comes first applies
+     * the scale; the other one then sees the pass is running and draws as it is.</p>
+     */
+    public void drawScaledTitleScreen(GuiGraphicsExtractor graphics, Screen screen, int mouseX, int mouseY,
+                                      ScaledTitleDraw draw) {
+        float factor = titleScreenScaleFactor(screen);
+        if (factor <= 0.0F || this.titlePassFactor > 0.0F) {
+            draw.draw(mouseX, mouseY);
+            return;
+        }
+        Matrix3x2fStack pose = graphics.pose();
+        pose.pushMatrix();
+        pose.scale(factor, factor);
+        this.titlePassFactor = factor;
+        this.titlePassWidth = screen.width;
+        this.titlePassHeight = screen.height;
+        try {
+            draw.draw((int) Math.floor(mouseX / factor), (int) Math.floor(mouseY / factor));
+        } finally {
+            this.titlePassFactor = -1.0F;
+            pose.popMatrix();
+        }
+    }
+
+    /** {@code GuiGraphicsExtractor.guiWidth()}, adjusted while a scaled title screen is being drawn. */
+    public int scaledGuiWidth(int guiWidth) {
+        return this.titlePassFactor > 0.0F ? this.titlePassWidth : guiWidth;
+    }
+
+    /** {@code GuiGraphicsExtractor.guiHeight()}, adjusted while a scaled title screen is being drawn. */
+    public int scaledGuiHeight(int guiHeight) {
+        return this.titlePassFactor > 0.0F ? this.titlePassHeight : guiHeight;
+    }
+
+    /** The configured button offset, in the title screen's GUI pixels ({@code 0} when the mod is off). */
+    public int buttonsYOffset() {
+        AuraIntroConfig cfg = AuraIntroConfigHolder.get();
+        return cfg.general.enabled ? cfg.layout.buttonsYOffset : 0;
     }
 
     /** Called after {@code TitleScreen.init()} to push the buttons down/up by the configured amount. */
     public void applyButtonYOffset(Screen screen) {
-        AuraIntroConfig cfg = AuraIntroConfigHolder.get();
-        if (!cfg.general.enabled || cfg.layout.buttonsYOffset == 0) {
+        int offset = buttonsYOffset();
+        if (offset == 0) {
             return;
         }
         for (GuiEventListener child : screen.children()) {
             if (child instanceof AbstractWidget widget) {
-                widget.setY(widget.getY() + cfg.layout.buttonsYOffset);
+                widget.setY(widget.getY() + offset);
             }
         }
-    }
-
-    /**
-     * Pushes the pose that draws one title screen widget at vanilla's layout for the configured
-     * button GUI scale (call between {@code pushMatrix()} and {@code popMatrix()} on the stack).
-     *
-     * <p>Vanilla lays the title screen out against fixed anchors, so the transform has to use those
-     * same anchors: every widget is centred on {@code width / 2}, the button block starts at
-     * {@code height / 4 + 48}, and the copyright line hangs off the bottom edge. Scaling around the
-     * screen centre instead (what a naive "GUI scale" transform does) moves the whole block by a
-     * quarter of the screen height relative to vanilla's own layout whenever the two scales differ.</p>
-     */
-    public static void pushButtonScale(Matrix3x2fStack pose, AbstractWidget widget, float factor,
-                                       int guiWidth, int guiHeight) {
-        float x = widget.getX();
-        float y = widget.getY();
-        float targetX = guiWidth / 2.0F + (x - guiWidth / 2.0F) * factor;
-        float targetY = buttonScaleTargetY(widget, guiHeight, factor);
-        pose.translate(targetX, targetY);
-        pose.scale(factor, factor);
-        pose.translate(-x, -y);
-    }
-
-    /**
-     * Transforms a mouse coordinate into the coordinate space of the scaled widget, so hit testing
-     * keeps matching what the user sees - the exact inverse of {@link #pushButtonScale}.
-     */
-    public static double[] mouseToButtonSpace(AbstractWidget widget, double x, double y, float factor,
-                                              int guiWidth, int guiHeight) {
-        double transformedX = guiWidth / 2.0 + (x - guiWidth / 2.0) / factor;
-        double transformedY;
-        if (widget.getY() + widget.getHeight() >= guiHeight) {
-            transformedY = guiHeight - (guiHeight - y) / factor;
-        } else {
-            transformedY = guiHeight / 4.0 + (y - guiHeight / 4.0) / factor;
-        }
-        return new double[]{transformedX, transformedY};
-    }
-
-    /** Where a widget's top edge belongs at the button GUI scale, using vanilla's own anchor. */
-    private static float buttonScaleTargetY(AbstractWidget widget, int guiHeight, float factor) {
-        float y = widget.getY();
-        if (y + widget.getHeight() >= guiHeight) {
-            // Bottom-anchored (the copyright line): its distance to the bottom edge scales.
-            return guiHeight - (guiHeight - y) * factor;
-        }
-        // The button block is anchored at height / 4 (plus fixed offsets), not the centre.
-        return guiHeight / 4.0F + (y - guiHeight / 4.0F) * factor;
     }
 
     // ------------------------------------------------------------------
@@ -1699,6 +1927,26 @@ public final class AuraIntroVideoManager {
      * afterwards the intro layer. Exactly one layer is drawn, once per frame.</p>
      */
     public void drawTitleScreenVideo(GuiGraphicsExtractor graphics) {
+        float factor = this.titlePassFactor;
+        if (factor <= 0.0F) {
+            drawTitleScreenVideoNow(graphics);
+            return;
+        }
+        // The title screen is drawn at its own GUI scale, but the video covers the window: undo the
+        // screen's scale and report the window's real size while it is drawn.
+        Matrix3x2fStack pose = graphics.pose();
+        pose.pushMatrix();
+        pose.scale(1.0F / factor, 1.0F / factor);
+        this.titlePassFactor = -1.0F;
+        try {
+            drawTitleScreenVideoNow(graphics);
+        } finally {
+            this.titlePassFactor = factor;
+            pose.popMatrix();
+        }
+    }
+
+    private void drawTitleScreenVideoNow(GuiGraphicsExtractor graphics) {
         if (this.sessionActive && this.introVisible) {
             drawIntroVideo(graphics);
             return;

@@ -75,6 +75,12 @@ public final class VideoFrameSink {
      */
     private volatile int outputWidth;
     private volatile int outputHeight;
+    /** Smoothed time between two frames the consumer drew, in ms (see noteDrawnFrame). */
+    private volatile double drawIntervalMs = 1000.0 / 60.0;
+    /** When the consumer last drew; render thread only. */
+    private long lastDrawNanos;
+    /** The upload cap the consumer last asked for (uploadIfDirty), 0 = none. */
+    private volatile int uploadMaxFps;
 
     private long lastUploadNanos;
 
@@ -92,6 +98,35 @@ public final class VideoFrameSink {
      */
     public void setForceOpaque(boolean forceOpaque) {
         this.forceOpaque = forceOpaque;
+    }
+
+    /**
+     * Tells the producer how often the picture is drawn: called by the render thread on every frame it
+     * draws the video, it is what {@link #pickupIntervalMs()} is measured from.
+     */
+    public void noteDrawnFrame() {
+        long now = System.nanoTime();
+        long last = this.lastDrawNanos;
+        this.lastDrawNanos = now;
+        if (last == 0L) {
+            return;
+        }
+        double intervalMs = (now - last) / 1_000_000.0;
+        if (intervalMs > 250.0) {
+            // Not drawn for a while (another screen, a hitch): that says nothing about the cadence.
+            return;
+        }
+        this.drawIntervalMs += (intervalMs - this.drawIntervalMs) * 0.1;
+    }
+
+    /**
+     * How long a committed frame waits until the consumer picks it up and it is on screen - one of
+     * the consumer's frames, or the upload cap's interval when that is longer. The producer hands
+     * frames over this much ahead of their time (see FfmpegVideoPlayer.awaitPresentationTime).
+     */
+    public double pickupIntervalMs() {
+        int cap = this.uploadMaxFps;
+        return Math.max(this.drawIntervalMs, cap > 0 ? 1000.0 / cap : 0.0);
     }
 
     /**
@@ -219,6 +254,7 @@ public final class VideoFrameSink {
                 // The texture still holds a frame of another size; the layer resizes it on the next upload.
                 return false;
             }
+            this.uploadMaxFps = maxFps;
             if (maxFps > 0) {
                 long minIntervalNanos = 1_000_000_000L / maxFps;
                 long now = System.nanoTime();

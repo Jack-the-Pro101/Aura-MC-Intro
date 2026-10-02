@@ -150,6 +150,7 @@ public final class VideoTextureLayer {
         // Written on every drawn frame, so window resizes track along on their own.
         int guiScale = Minecraft.getInstance().getWindow().getGuiScale();
         sink.noteOutputSize(guiWidth * guiScale, guiHeight * guiScale);
+        sink.noteDrawnFrame();
 
         float[] rect = fitRect(fit, aspectWidth, aspectHeight, guiWidth, guiHeight);
         // The 1.21.x branch below: GuiGraphics.innerBlit takes its int coordinates as

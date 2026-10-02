@@ -1,9 +1,11 @@
 package net.bluegaria.auraintro.mixin.client;
 
 import com.llamalad7.mixinextras.injector.ModifyExpressionValue;
+import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import net.bluegaria.auraintro.client.video.AuraIntroVideoManager;
+import net.bluegaria.auraintro.client.video.ScaledTitleScreen;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.components.AbstractWidget;
@@ -12,6 +14,7 @@ import net.minecraft.client.gui.components.events.GuiEventListener;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.TitleScreen;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.gen.Accessor;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -22,15 +25,56 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * <ul>
  *   <li>replaces vanilla's fixed two second button fade with the configured video timestamps,</li>
  *   <li>fades the version/mod-count line, the splash text and the Realms badge on their own timetable,</li>
+ *   <li>lays the whole screen out at the configured GUI scale before {@code init()} (see
+ *       {@link net.bluegaria.auraintro.mixin.client.ScreenMixin} for the drawing side),</li>
  *   <li>applies the configured vertical offset to the buttons after {@code init()},</li>
  *   <li>optionally hides the splash text.</li>
  * </ul>
  */
 @Mixin(TitleScreen.class)
-public abstract class TitleScreenMixin {
+public abstract class TitleScreenMixin implements ScaledTitleScreen {
+
+    /** The factor the current layout was made for, or -1 when it uses the game's own GUI scale. */
+    @Unique
+    private float auraintro$guiScaleFactor = -1.0F;
 
     @Accessor("fading")
     public abstract void setFading(boolean fading);
+
+    @Override
+    public float auraintro$guiScaleFactor() {
+        return this.auraintro$guiScaleFactor;
+    }
+
+    /**
+     * Gives the screen the size it has at the configured GUI scale before vanilla lays it out, so every
+     * element - the Realms badge and the copyright line included - ends up where the game itself would
+     * put it at that scale. Every path into a layout ({@code init(width, height)}, {@code resize},
+     * {@code rebuildWidgets}) runs through here.
+     */
+    @Inject(method = "init", at = @At("HEAD"))
+    private void auraintro$applyGuiScale(CallbackInfo ci) {
+        this.auraintro$guiScaleFactor = AuraIntroVideoManager.layOutTitleScreen(
+                (Screen) (Object) this, this.auraintro$guiScaleFactor > 0.0F);
+    }
+
+    /**
+     * Applies the title screen's GUI scale when something draws the screen directly instead of through
+     * the normal frame - the Friends overlay draws it blurred behind itself this way. Without this the
+     * screen's scaled layout came out at the game's GUI scale there. On the normal frame
+     * {@link ScreenMixin} has already applied the scale, and this draws as it is.
+     */
+    @WrapMethod(method = "extractRenderState")
+    private void auraintro$scaledWhenDrawnDirectly(GuiGraphicsExtractor graphics, int mouseX, int mouseY,
+                                                     float partialTick, Operation<Void> original) {
+        Screen screen = (Screen) (Object) this;
+        if (AuraIntroVideoManager.titleScreenScaleFactor(screen) <= 0.0F) {
+            original.call(graphics, mouseX, mouseY, partialTick);
+            return;
+        }
+        AuraIntroVideoManager.get().drawScaledTitleScreen(graphics, screen, mouseX, mouseY,
+                (x, y) -> original.call(graphics, x, y, partialTick));
+    }
 
     @Inject(method = "extractRenderState", at = @At("HEAD"))
     private void auraintro$applyButtonFade(GuiGraphicsExtractor graphics, int mouseX, int mouseY,

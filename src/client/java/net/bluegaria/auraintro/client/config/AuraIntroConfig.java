@@ -71,6 +71,14 @@ public class AuraIntroConfig implements ConfigData {
         @ConfigEntry.Gui.Tooltip
         public boolean fadeInAfterVideo = true;
 
+        /**
+         * With {@link #fadeInAfterVideo} and a loop region: a loop never ends, so the wordmark would stay
+         * hidden for good. On fades it in the first time the video loops instead (when the music takes
+         * over). Off keeps it hidden while the loop plays - for a video with its own logo.
+         */
+        @ConfigEntry.Gui.Tooltip
+        public boolean wordmarkAfterFirstLoop = false;
+
         /** Hides the rotating yellow splash text as well. */
         @ConfigEntry.Gui.Tooltip
         public boolean hideSplashText = false;
@@ -269,6 +277,23 @@ public class AuraIntroConfig implements ConfigData {
         @ConfigEntry.Gui.Tooltip
         @ConfigEntry.BoundedDiscrete(min = 0, max = 600000)
         public int loopEndMs = 0;
+
+        /**
+         * Keeps the loop region as the title screen's background for the rest of the session: leaving
+         * the title screen (another menu, a world) pauses the loop instead of ending it, and it carries
+         * on when the title screen comes back - the panorama never takes over. Only used by
+         * {@link EndBehaviour#LOOP_REGION}; the video's sound stays muted and the menu music plays.
+         */
+        @ConfigEntry.Gui.Tooltip
+        public boolean persistLoopAsBackground = false;
+
+        /**
+         * With {@link #persistLoopAsBackground}: the loop also keeps playing behind the other menus
+         * (options, world select, ...) - blurred, where vanilla shows its panorama - instead of pausing
+         * until the title screen is back. In a world it pauses either way.
+         */
+        @ConfigEntry.Gui.Tooltip
+        public boolean loopInOtherMenus = false;
     }
 
     public static class Layout {
@@ -281,8 +306,9 @@ public class AuraIntroConfig implements ConfigData {
         public int buttonsYOffset = 0;
 
         /**
-         * GUI scale applied only to the title screen buttons, independent of the game's own GUI
-         * scale - with exactly vanilla's semantics: an integer scale that is clamped to what the
+         * GUI scale applied to the whole title screen (buttons, wordmark, splash, version and
+         * copyright lines, Realms badge), independent of the game's own GUI scale - with exactly
+         * vanilla's semantics: an integer scale that is clamped to what the
          * window supports, just like the game's "GUI Scale" option. -1 (default) follows the
          * regular GUI scale, 0 means "Auto" (the largest scale the window supports) and 1-4 are
          * fixed scales.

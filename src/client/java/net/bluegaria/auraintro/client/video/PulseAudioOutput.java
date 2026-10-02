@@ -281,18 +281,21 @@ final class PulseAudioOutput implements AudioOutput {
                 return false;
             }
             this.writtenBytes += data.length;
-            measureLatency(stream);
+            measureLatency(stream, data.length);
         }
         return true;
     }
 
     /**
-     * Right after a write, the reported latency is how long the bytes just written take to be
-     * heard - and since the player writes each chunk at its timestamp, how far the sound trails
-     * the clock. Smoothed, and only republished on a real change, as the picture's delay.
+     * Right after a write, the reported latency is how long until the <em>last</em> byte just written
+     * is heard; the chunk's first sample - the one at the chunk's timestamp, which the player writes
+     * when the clock reaches it - plays one chunk earlier. That start-to-ear figure is how far the
+     * sound trails the clock, and the picture's delay. Smoothed, and only republished on a real
+     * change.
      */
-    private void measureLatency(Pointer stream) {
-        long latencyUs = this.pulse.pa_simple_get_latency(stream, this.error);
+    private void measureLatency(Pointer stream, int writtenLength) {
+        long chunkUs = writtenLength * 1_000_000L / (this.rate * (long) this.channels * 2L);
+        long latencyUs = this.pulse.pa_simple_get_latency(stream, this.error) - chunkUs;
         if (latencyUs < MIN_PLAUSIBLE_LATENCY_US || latencyUs > MAX_PLAUSIBLE_LATENCY_US) {
             return;
         }

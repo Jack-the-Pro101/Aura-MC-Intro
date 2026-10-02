@@ -20,6 +20,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * the internal song countdown never advances meanwhile, so once the video ends (fades out, freezes
  * after its end, or is stopped), the menu music comes back on vanilla's own timetable. A song that
  * is already playing when the video starts (for example on a resource reload replay) is stopped.</p>
+ *
+ * <p>With a loop region the video never ends, so the music takes over the first time it loops
+ * instead - and right away rather than after vanilla's countdown (which can be several seconds).</p>
  */
 @Mixin(MusicManager.class)
 public abstract class MusicManagerMixin {
@@ -28,12 +31,19 @@ public abstract class MusicManagerMixin {
 
     @Shadow private SoundInstance currentMusic;
 
+    @Shadow private int nextSongDelay;
+
     /** One-shot diagnostic: when suppression first kicked in (debug logging only). */
     @Unique
     private boolean auraintro$suppressionLogged;
 
     @Inject(method = "tick", at = @At("HEAD"), cancellable = true)
     private void auraintro$suppressWhileVideoPlays(CallbackInfo ci) {
+        if (AuraIntroVideoManager.get().consumeMenuMusicStart()) {
+            // The video just handed the sound over (its loop muted it): vanilla's tick below starts
+            // the menu music now.
+            this.nextSongDelay = 0;
+        }
         if (!AuraIntroVideoManager.get().suppressMenuMusic()) {
             return;
         }

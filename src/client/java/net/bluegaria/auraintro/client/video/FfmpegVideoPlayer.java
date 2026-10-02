@@ -144,6 +144,8 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     private Path file;
 
     private volatile boolean closed;
+    /** Set by the first close(): only that one runs the teardown (see finishClose). */
+    private final AtomicBoolean closeStarted = new AtomicBoolean();
     private volatile boolean finished;
     private volatile boolean debug;
 
@@ -816,10 +818,35 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         swscale.sws_scale(this.swsContext, src.data(), src.linesize(),
                 0, height, this.rgbaFrame.data(), this.rgbaFrame.linesize());
         this.sink.processAlpha(target, outWidth * outHeight);
+        awaitPresentationTime(ptsMs);
         this.sink.commitFrame(outWidth, outHeight);
         this.firstFrameSeen = true;
         this.firstVideoFrameSeen = true;
         this.presentedFrames++;
+    }
+
+    /**
+     * Holds a converted frame until its time. Decoding runs ahead by up to {@link #MAX_VIDEO_LEAD_MS},
+     * and showing frames the moment they were decoded put the picture that much ahead of the sound.
+     * "Its time" is one pickup interval before the timestamp: the render thread only takes the frame
+     * on its next frame, and that is how long it takes until the frame is on screen
+     * ({@link VideoFrameSink#pickupIntervalMs()} - measured, so it fits 30 fps and 240 fps alike).
+     *
+     * <p>Not for a frame that exists to be shown right away - the preload's first frame, or the one
+     * frame a seek while paused puts on screen - and never past a seek, a pause or a close.</p>
+     */
+    private void awaitPresentationTime(double ptsMs) {
+        if (this.paused || (this.pauseAfterFirstFrame && !this.firstVideoFrameSeen)) {
+            return;
+        }
+        double pickupMs = Math.min(50.0, this.sink.pickupIntervalMs());
+        while (!this.closed && !this.paused && this.seekRequestMs < 0L) {
+            double aheadMs = ptsMs - pickupMs - videoClockMs();
+            if (aheadMs <= 0.0) {
+                return;
+            }
+            sleepUnchecked(Math.max(1L, Math.min(10L, (long) aheadMs)));
+        }
     }
 
     /**
@@ -1161,10 +1188,10 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         if (this.audioAnchorUs == Long.MIN_VALUE) {
             this.audioAnchorUs = mediaUs;
             // A trusted device position is anchored on the chunk directly. An output paced on
-            // the wall clock instead reports "written minus its latency", and the chunk just
-            // written ends at the written position: what is audible right now is that far back.
+            // the wall clock instead takes the chunk's latency to make its first sample heard:
+            // what is audible right now is that far back.
             this.audioAnchorPtsMs = this.useAudioClock ? chunkPtsMs
-                    : chunkPtsMs + chunkDurationMs - this.audioOutput.nominalLatencyMs();
+                    : chunkPtsMs - this.audioOutput.nominalLatencyMs();
             this.audioAnchorWrittenBytes = this.audioWrittenBytes;
             this.audioMediaUsFloor = mediaUs;
             // The stale-clock extrapolation may have run the clock ahead of the device while the
@@ -1209,9 +1236,9 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         this.lastAvSyncLogNanos = now;
         if (this.audioClockValid && this.lastVideoPtsMs >= 0L) {
             LOGGER.info("A/V sync: decoded picture {} ms, audible sound {} ms, output latency {} ms, "
-                            + "configured offset {} ms, stale sound chunks dropped {}",
+                            + "configured offset {} ms, frame pickup {} ms, stale sound chunks dropped {}",
                     this.lastVideoPtsMs, this.audioClockMs, this.audioOutput.nominalLatencyMs(),
-                    this.audioLatencyMs, this.staleAudioDropped);
+                    this.audioLatencyMs, Math.round(this.sink.pickupIntervalMs()), this.staleAudioDropped);
         }
     }
 
@@ -1485,9 +1512,39 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     // Teardown
     // ------------------------------------------------------------------
 
+    /**
+     * Stops playback and frees everything, without blocking the caller.
+     *
+     * <p>The decoder and audio threads are told to stop right away, but waiting for them and freeing
+     * the FFmpeg contexts, the sound output and the frame buffers happens on a thread of its own. That
+     * part can take a long time - an audio thread blocked in the sound server's write, a hardware
+     * decoder being torn down - and close() is called on the render thread when the intro ends: a
+     * stall there over 350 ms freezes the title screen's panorama (vanilla's real-time delta clamps
+     * such a frame to half a tick). A closed player is never opened again ({@code open} refuses once
+     * {@link #closed} is set), so nothing can race the teardown.</p>
+     */
     @Override
     public void close() {
         this.closed = true;
+        if (!this.closeStarted.compareAndSet(false, true)) {
+            return;
+        }
+        Thread closer = new Thread(this::finishClose, "Aura-Intro-FFmpeg-Close");
+        closer.setDaemon(true);
+        closer.start();
+    }
+
+    @Override
+    public boolean isClosed() {
+        return this.closed;
+    }
+
+    @Override
+    public VideoPlayer fresh() {
+        return new FfmpegVideoPlayer(this.mode);
+    }
+
+    private void finishClose() {
         joinQuietly(this.decodeThread, 5000);
         joinQuietly(this.audioThread, 2000);
         if (this.hwActive && this.presentedFrames == 0) {

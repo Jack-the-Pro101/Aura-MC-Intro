@@ -1,51 +1,52 @@
 package net.bluegaria.auraintro.mixin.client;
 
+import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
-import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import net.bluegaria.auraintro.client.video.AuraIntroVideoManager;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
-import net.minecraft.client.gui.components.AbstractWidget;
-import net.minecraft.client.gui.components.Renderable;
 import net.minecraft.client.gui.screens.Screen;
-import org.joml.Matrix3x2fStack;
+import net.minecraft.client.gui.screens.TitleScreen;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * Applies the separate "buttons GUI scale" to the title screen widgets only, without touching
- * the rest of the UI (or the vanilla GUI scale option).
+ * Draws the title screen at the separate GUI scale from the config, without touching the rest of the UI
+ * (or the vanilla GUI scale option).
  *
- * <p>Each widget is transformed with vanilla's own title screen anchors (see
- * {@link AuraIntroVideoManager#pushButtonScale}), so the result matches what the game itself
- * draws at that GUI scale - same sizes, same positions, text included.</p>
+ * <p>The title screen is laid out at that scale to begin with (see
+ * {@link AuraIntroVideoManager#layOutTitleScreen}), so drawing it is one uniform scale of everything the
+ * screen draws - panorama, buttons, wordmark, splash, version line, copyright, Realms badge and tooltips
+ * alike - and the result is pixel for pixel what the game itself draws at that GUI scale. Wrapping the
+ * whole frame here is what brings the tooltips (drawn after the screen) along; a screen that draws the
+ * title screen behind itself is covered by {@link TitleScreenMixin}.</p>
+ *
+ * <p>Also draws a persistent loop behind the other menus, right where they draw vanilla's panorama -
+ * so the menu's blur goes over it the same way.</p>
  */
 @Mixin(Screen.class)
 public abstract class ScreenMixin {
 
-    @WrapOperation(
-            method = "extractRenderState",
-            at = @At(value = "INVOKE",
-                    target = "Lnet/minecraft/client/gui/components/Renderable;extractRenderState(Lnet/minecraft/client/gui/GuiGraphicsExtractor;IIF)V"))
-    private void auraintro$scaledButtons(Renderable renderable, GuiGraphicsExtractor graphics, int mouseX,
-                                           int mouseY, float partialTick, Operation<Void> original) {
-        float factor = AuraIntroVideoManager.get().buttonScaleFactorFor((Screen) (Object) this);
-        if (factor <= 0.0F || factor == 1.0F || !(renderable instanceof AbstractWidget widget)) {
-            original.call(renderable, graphics, mouseX, mouseY, partialTick);
+    @WrapMethod(method = "extractRenderStateWithTooltipAndSubtitles")
+    private void auraintro$scaledTitleScreen(GuiGraphicsExtractor graphics, int mouseX, int mouseY,
+                                               float partialTick, Operation<Void> original) {
+        Screen screen = (Screen) (Object) this;
+        if (AuraIntroVideoManager.titleScreenScaleFactor(screen) <= 0.0F) {
+            original.call(graphics, mouseX, mouseY, partialTick);
             return;
         }
+        AuraIntroVideoManager.get().drawScaledTitleScreen(graphics, screen, mouseX, mouseY,
+                (x, y) -> original.call(graphics, x, y, partialTick));
+    }
 
-        int guiWidth = graphics.guiWidth();
-        int guiHeight = graphics.guiHeight();
-        double[] scaledMouse = AuraIntroVideoManager.mouseToButtonSpace(
-                widget, mouseX, mouseY, factor, guiWidth, guiHeight);
-        Matrix3x2fStack pose = graphics.pose();
-        pose.pushMatrix();
-        AuraIntroVideoManager.pushButtonScale(pose, widget, factor, guiWidth, guiHeight);
-        try {
-            original.call(renderable, graphics, (int) Math.round(scaledMouse[0]),
-                    (int) Math.round(scaledMouse[1]), partialTick);
-        } finally {
-            pose.popMatrix();
+    @Inject(method = "extractPanorama", at = @At("TAIL"))
+    private void auraintro$loopBehindMenus(GuiGraphicsExtractor graphics, float partialTick, CallbackInfo ci) {
+        // The title screen draws its own video (TitleScreenMixin); this is for the other menus.
+        if (!((Object) this instanceof TitleScreen) && AuraIntroVideoManager.get().drawMenuBackgroundVideo(graphics)) {
+            // Vanilla blurs everything before the stratum it blurs in, and that is the one the panorama
+            // was drawn in: a stratum of its own puts the video under the blur too.
+            graphics.nextStratum();
         }
     }
 }

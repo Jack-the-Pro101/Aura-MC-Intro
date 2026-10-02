@@ -129,4 +129,10 @@ public interface VideoPlayer {
     VideoFrameSink sink();
 
     void close();
+
+    /** Whether {@link #close()} was called - a closed player can never be opened again. */
+    boolean isClosed();
+
+    /** A new, unopened player of the same kind, to take a closed one's place. */
+    VideoPlayer fresh();
 }

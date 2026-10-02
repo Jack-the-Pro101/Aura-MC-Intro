@@ -59,9 +59,9 @@ interface AudioOutput {
     void setVolume(float volume);
 
     /**
-     * The depth of the output's own buffering, in milliseconds - how long a written sample travels
-     * before it is audible. Outputs whose {@link #mediaPositionUs()} already reflects this (a
-     * device position) do not need it and report 0.
+     * How long a chunk written now takes until its first sample is heard, in milliseconds - the
+     * output's whole latency, device included. Outputs whose {@link #mediaPositionUs()} already
+     * reflects this (a device position) do not need it and report 0.
      */
     default int nominalLatencyMs() {
         return 0;

@@ -5,6 +5,7 @@
   "compatibilityLevel": "${mixin_compat}",
   "client": [
     "AbstractWidgetMixin",
+    "GuiScaledSizeMixin",
     "LoadingOverlayAccessor",
     "LoadingOverlayMixin",
     "LogoRendererMixin",
