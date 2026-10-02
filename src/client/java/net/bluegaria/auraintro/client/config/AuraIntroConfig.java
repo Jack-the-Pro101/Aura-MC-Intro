@@ -1,5 +1,6 @@
 package net.bluegaria.auraintro.client.config;
 
+import com.google.gson.annotations.SerializedName;
 import me.shedaniel.autoconfig.ConfigData;
 import me.shedaniel.autoconfig.annotation.Config;
 import me.shedaniel.autoconfig.annotation.ConfigEntry;
@@ -188,11 +189,6 @@ public class AuraIntroConfig implements ConfigData {
     }
 
     public static class Timing {
-        /** Delay between "loading finished" and the first video frame, in milliseconds. */
-        @ConfigEntry.Gui.Tooltip
-        @ConfigEntry.BoundedDiscrete(min = 0, max = 20000)
-        public int videoStartDelayMs = 0;
-
         /**
          * How long the video takes to fade in once it starts, in milliseconds. Only used when the
          * loading screen does <em>not</em> show the video (with the video already on screen behind
@@ -357,22 +353,19 @@ public class AuraIntroConfig implements ConfigData {
         public boolean hideVanillaLogo = true;
 
         /**
-         * When enabled the video keeps looping instead of holding its last frame. Off by default,
-         * because holding the last frame gives a static background for the loading bar.
+         * When enabled the loading screen is kept up until the video has reached the freeze frame
+         * ({@link #holdAtMs}) - or its end, with {@code holdAtMs} at 0 - so the intro never starts
+         * from a frame the loading scene has not shown yet.
+         *
+         * <p>Called {@code waitForVideoToFinish} before; configs that still use that name are read too.</p>
          */
         @ConfigEntry.Gui.Tooltip
-        public boolean loop = false;
-
-        /**
-         * When enabled the loading screen is kept up until the video has played to the
-         * end, so the next scene (the intro / title screen) never starts mid-clip.
-         */
-        @ConfigEntry.Gui.Tooltip
-        public boolean waitForVideoToFinish = true;
+        @SerializedName(value = "waitUntilHoldMsReached", alternate = "waitForVideoToFinish")
+        public boolean waitUntilHoldMsReached = true;
 
         /**
          * Safety net for the option above: give up waiting after this many milliseconds so a
-         * broken/looping video can never block loading. 0 = wait forever.
+         * stalled video can never block loading. 0 = wait forever.
          */
         @ConfigEntry.Gui.Tooltip
         @ConfigEntry.BoundedDiscrete(min = 0, max = 600000)
@@ -449,7 +442,6 @@ public class AuraIntroConfig implements ConfigData {
         this.video.audioLatencyMs = clamp(this.video.audioLatencyMs, -1000, 2000);
 
         Timing t = this.timing;
-        t.videoStartDelayMs = Math.max(0, t.videoStartDelayMs);
         t.videoFadeInMs = Math.max(0, t.videoFadeInMs);
         t.progressBarFadeStartMs = Math.max(0, t.progressBarFadeStartMs);
         t.progressBarFadeDurationMs = Math.max(0, t.progressBarFadeDurationMs);

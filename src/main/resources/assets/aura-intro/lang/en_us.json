@@ -42,8 +42,6 @@
   "text.autoconfig.aura-intro.option.video.hardwareDecoding.@Tooltip": "Decode the video on the GPU: D3D11VA on Windows, VideoToolbox on macOS, VAAPI (Intel/AMD) or NVDEC (NVIDIA) on Linux. Falls back to software decoding automatically when no working hardware decoder is found.",
 
   "text.autoconfig.aura-intro.option.timing": "Timing (relative to video start)",
-  "text.autoconfig.aura-intro.option.timing.videoStartDelayMs": "Video start delay (ms)",
-  "text.autoconfig.aura-intro.option.timing.videoStartDelayMs.@Tooltip": "Delay between finishing loading and the first video frame.",
   "text.autoconfig.aura-intro.option.timing.videoFadeInMs": "Video fade in (ms)",
   "text.autoconfig.aura-intro.option.timing.videoFadeInMs.@Tooltip": "How long the video fades in once it starts. Only used when the loading screen does not show the video.",
   "text.autoconfig.aura-intro.option.timing.progressBarFadeStartMs": "Progress bar fade start (ms)",
@@ -92,10 +90,8 @@
   "text.autoconfig.aura-intro.option.loadingBackground.fadeInMs.@Tooltip": "Fade-in duration once the loading screen appears. 0 (the default) cuts straight to the video.",
   "text.autoconfig.aura-intro.option.loadingBackground.hideVanillaLogo": "Hide vanilla Mojang logo",
   "text.autoconfig.aura-intro.option.loadingBackground.hideVanillaLogo.@Tooltip": "Hide the vanilla MOJANG STUDIOS logo while the video is showing, so the loading bar sits directly on the video.",
-  "text.autoconfig.aura-intro.option.loadingBackground.loop": "Loop instead of freezing",
-  "text.autoconfig.aura-intro.option.loadingBackground.loop.@Tooltip": "Keep looping the video instead of holding its last frame. Off by default: freezing leaves a static background for the loading bar.",
-  "text.autoconfig.aura-intro.option.loadingBackground.waitForVideoToFinish": "Wait for video to finish",
-  "text.autoconfig.aura-intro.option.loadingBackground.waitForVideoToFinish.@Tooltip": "Keep the loading screen up until this video has played to the end, so the next scene never starts mid-clip.",
+  "text.autoconfig.aura-intro.option.loadingBackground.waitUntilHoldMsReached": "Wait until the freeze frame is reached",
+  "text.autoconfig.aura-intro.option.loadingBackground.waitUntilHoldMsReached.@Tooltip": "Keep the loading screen up until the video has reached the freeze frame (or its end, when the freeze frame is 0), so the intro never starts from a frame the loading screen has not shown yet.",
   "text.autoconfig.aura-intro.option.loadingBackground.maxWaitForVideoMs": "Max wait time (ms)",
-  "text.autoconfig.aura-intro.option.loadingBackground.maxWaitForVideoMs.@Tooltip": "Safety net for the option above: continue loading after this long even if the video never ends. 0 = wait forever."
+  "text.autoconfig.aura-intro.option.loadingBackground.maxWaitForVideoMs.@Tooltip": "Safety net for the option above: continue loading after this long even if the video never gets there. 0 = wait forever."
 }

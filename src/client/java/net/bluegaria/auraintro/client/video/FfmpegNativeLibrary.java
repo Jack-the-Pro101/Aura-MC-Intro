@@ -73,7 +73,7 @@ public final class FfmpegNativeLibrary {
                 Loader.load(swscale.class);
                 Loader.load(avcodec.class);
                 Loader.load(avformat.class);
-                avutil.av_log_set_level(avutil.AV_LOG_ERROR);
+                FfmpegLog.install();
                 available = true;
                 LOGGER.info("FFmpeg {} loaded from the libraries bundled with the mod",
                         avutil.av_version_info().getString());

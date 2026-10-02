@@ -39,6 +39,21 @@ public interface VideoPlayer {
     void seekMs(long positionMs);
 
     /**
+     * Makes the backend loop {@code [startMs, endMs]} on its own: right after the region's last frame
+     * has had its screen time, playback continues from {@code startMs} - frame-exact, with no
+     * client-tick latency and no jump in the picture's timeline. {@code endMs} 0 means the end of the
+     * media; a negative {@code startMs} turns looping off. Playback before {@code startMs} is not
+     * affected (the region only decides where the end wraps to).
+     */
+    default void setLoopRegion(long startMs, long endMs) {
+    }
+
+    /** How often the loop region has wrapped around since the player started (see {@link #setLoopRegion}). */
+    default int loopCount() {
+        return 0;
+    }
+
+    /**
      * Last playback position the backend reported, cached from its decode threads. Pure getter -
      * the client thread must never trigger work inside the backend here.
      *

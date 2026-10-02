@@ -27,9 +27,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
+import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -166,6 +171,10 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     private volatile float volume = 1.0f;
     private volatile boolean paused;
     private volatile long seekRequestMs = -1L;
+    /** Loop region (see {@link #setLoopRegion}); a negative start means no looping. */
+    private volatile long loopStartMs = -1L;
+    private volatile long loopEndMs;
+    private volatile int loopCount;
     private volatile long audioDelayMs;
     private volatile boolean pauseAfterFirstFrame;
     /**
@@ -255,6 +264,8 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     // travel through the same swscale conversion as software frames.
     private volatile boolean hardwareDecoding = true;
     private static final AtomicBoolean HW_UNUSABLE = new AtomicBoolean(false);
+    /** The "no hardware decoder" warning is written once per process, not once per player. */
+    private static final AtomicBoolean HW_FAILURE_REPORTED = new AtomicBoolean(false);
     private AVBufferRef hwDeviceBuf;
     private int hwPixFmt = -1;
     private boolean hwActive;
@@ -281,6 +292,14 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     private volatile long lastVideoPtsMs = -1L;
     private long skipFramesUntilMs = -1L;
     private boolean singleFrameAfterSeek;
+    /** Decode thread: the decoder produced a frame past the loop region, so it is time to wrap. */
+    private boolean loopWrapPending;
+    /** Decode thread: after a loop wrap, the first frame of the region re-anchors the clock (see wrapLoop). */
+    private boolean reanchorOnNextFrame;
+    private long loopWrapNanos;
+    private long loopWrapFromMs;
+    /** When the region's last frame has had its screen time - the seam the next frame is due at. */
+    private long loopSeamNanos;
     private boolean pendingStartSilence;
     private boolean audioQueueWarningLogged;
     private long lastAvSyncLogNanos;
@@ -514,6 +533,7 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         if (!this.hardwareDecoding || HW_UNUSABLE.get()) {
             return;
         }
+        List<String> attempts = new ArrayList<>();
         for (int type : hwDeviceTypes()) {
             // Does the codec have a hardware configuration for this device type at all?
             boolean codecSupports = false;
@@ -530,9 +550,10 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
                 }
             }
             if (!codecSupports) {
+                attempts.add(hwDeviceTypeName(type) + ": not supported by the bundled FFmpeg");
                 continue;
             }
-            if (!createHwDevice(type)) {
+            if (!createHwDevice(type, attempts)) {
                 continue;
             }
             codecContext.hw_device_ctx(avutil.av_buffer_ref(this.hwDeviceBuf));
@@ -542,43 +563,148 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
             }
             return;
         }
-        if (this.debug) {
-            LOGGER.info("No usable hardware decoder for {} - decoding in software", this.file);
-        }
+        reportNoHardwareDecoder(attempts);
     }
 
-    private boolean createHwDevice(int type) {
+    private boolean createHwDevice(int type, List<String> attempts) {
         this.hwDeviceBuf = new AVBufferRef(null);
-        // The default device first; on Linux also try every render node, since multi-GPU
-        // machines may expose the working VAAPI device on the second one.
-        if (tryCreateHwDevice(type, null)) {
-            return true;
-        }
         if (type == avutil.AV_HWDEVICE_TYPE_VAAPI) {
+            // Every render node in turn. FFmpeg's own default would be just the first node it can
+            // open - on a laptop with a second GPU often the one without a VA-API driver (an NVIDIA
+            // card next to the Intel iGPU), and it never moves on to the next one.
             File[] nodes = new File("/dev/dri").listFiles((dir, name) -> name.startsWith("renderD"));
-            if (nodes != null) {
+            if (nodes != null && nodes.length > 0) {
                 Arrays.sort(nodes);
                 for (File node : nodes) {
-                    if (tryCreateHwDevice(type, node.getAbsolutePath())) {
+                    if (tryCreateHwDevice(type, node.getAbsolutePath(), attempts)) {
                         return true;
                     }
                 }
+                this.hwDeviceBuf = null;
+                return false;
             }
+        }
+        if (tryCreateHwDevice(type, null, attempts)) {
+            return true;
         }
         this.hwDeviceBuf = null;
         return false;
     }
 
-    private boolean tryCreateHwDevice(int type, String device) {
-        int ret = avutil.av_hwdevice_ctx_create(this.hwDeviceBuf, type, device, null, 0);
-        if (ret < 0) {
+    private boolean tryCreateHwDevice(int type, String device, List<String> attempts) {
+        List<String> ffmpegSaid = new ArrayList<>();
+        int[] ret = new int[1];
+        boolean ok = FfmpegLog.capture(ffmpegSaid, () -> {
+            ret[0] = avutil.av_hwdevice_ctx_create(this.hwDeviceBuf, type, device, null, 0);
+            return ret[0] >= 0;
+        });
+        String where = hwDeviceTypeName(type) + (device == null ? "" : " on " + describeRenderNode(device));
+        if (ok) {
             if (this.debug) {
-                LOGGER.info("Could not open a {} device{}: {}", hwDeviceTypeName(type),
-                        device == null ? "" : " (" + device + ")", errorString(ret));
+                LOGGER.info("Opened {}", where);
             }
-            return false;
+            return true;
         }
-        return true;
+        StringBuilder attempt = new StringBuilder(where).append(": ").append(errorString(ret[0]));
+        for (String line : ffmpegSaid) {
+            attempt.append("\n      ").append(line);
+        }
+        attempts.add(attempt.toString());
+        return false;
+    }
+
+    /**
+     * Software decoding of a 4K video is what makes the intro stutter - most of all during start-up,
+     * when the game's own loading has every core busy - so a machine whose GPU could decode it but
+     * does not is worth one clear warning, with what each device said and what usually fixes it.
+     */
+    private void reportNoHardwareDecoder(List<String> attempts) {
+        if (!HW_FAILURE_REPORTED.compareAndSet(false, true)) {
+            if (this.debug) {
+                LOGGER.info("No usable hardware decoder for {} - decoding in software", this.file);
+            }
+            return;
+        }
+        StringBuilder message = new StringBuilder("No usable hardware video decoder - decoding ")
+                .append(this.file.getFileName()).append(" in software, which can stutter for a large video:");
+        for (String attempt : attempts) {
+            message.append("\n  - ").append(attempt);
+        }
+        String hint = hardwareDecodingHint();
+        if (hint != null) {
+            message.append("\n  ").append(hint);
+        }
+        LOGGER.warn(message.toString());
+    }
+
+    /** "/dev/dri/renderD128 (Intel, i915)" - which GPU a render node belongs to, as far as sysfs tells. */
+    private static String describeRenderNode(String device) {
+        String node = Path.of(device).getFileName().toString();
+        String vendor = gpuVendor(node);
+        String driver = kernelDriver(node);
+        if (vendor == null && driver == null) {
+            return device;
+        }
+        return device + " (" + (vendor == null ? "unknown GPU" : vendor) + (driver == null ? "" : ", " + driver) + ")";
+    }
+
+    private static String gpuVendor(String node) {
+        try {
+            String id = Files.readString(Path.of("/sys/class/drm", node, "device", "vendor"),
+                    StandardCharsets.US_ASCII).trim();
+            return switch (id) {
+                case "0x8086" -> "Intel";
+                case "0x1002" -> "AMD";
+                case "0x10de" -> "NVIDIA";
+                default -> "vendor " + id;
+            };
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    private static String kernelDriver(String node) {
+        try {
+            return Files.readSymbolicLink(Path.of("/sys/class/drm", node, "device", "driver"))
+                    .getFileName().toString();
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    /** What usually makes hardware decoding work on this machine, or null when there is nothing to suggest. */
+    private static String hardwareDecodingHint() {
+        if (!Loader.getPlatform().startsWith("linux")) {
+            return null;
+        }
+        boolean flatpak = Files.exists(Path.of("/.flatpak-info"));
+        File[] nodes = new File("/dev/dri").listFiles((dir, name) -> name.startsWith("renderD"));
+        if (nodes == null || nodes.length == 0) {
+            return flatpak
+                    ? "No GPU is visible inside the Flatpak sandbox - the launcher needs GPU access (--device=dri)."
+                    : "No GPU render node (/dev/dri/renderD*) is visible to the game.";
+        }
+        List<String> hints = new ArrayList<>();
+        for (File node : nodes) {
+            String vendor = gpuVendor(node.getName());
+            if ("Intel".equals(vendor)) {
+                hints.add(flatpak
+                        ? "Intel GPU in a Flatpak: install the runtime's Intel VA-API driver, "
+                                + "'flatpak install flathub org.freedesktop.Platform.VAAPI.Intel' (the branch matching "
+                                + "the runtime the launcher uses - see 'flatpak list --runtime')."
+                        : "Intel GPU: install Intel's VA-API driver (intel-media-driver on Arch and Fedora, "
+                                + "intel-media-va-driver on Debian/Ubuntu); 'vainfo' should then list VAProfileVP9Profile0.");
+            } else if ("AMD".equals(vendor)) {
+                hints.add(flatpak
+                        ? "AMD GPU in a Flatpak: Mesa's VA-API driver comes with the Flatpak GL runtime - update it "
+                                + "('flatpak update')."
+                        : "AMD GPU: install Mesa's VA-API driver (part of mesa on Arch, mesa-va-drivers on "
+                                + "Debian/Ubuntu); 'vainfo' should then list VAProfileVP9Profile0.");
+            } else if ("NVIDIA".equals(vendor)) {
+                hints.add("NVIDIA GPU: NVDEC needs NVIDIA's proprietary driver (libcuda and libnvcuvid).");
+            }
+        }
+        return hints.isEmpty() ? null : String.join("\n  ", hints.stream().distinct().toList());
     }
 
     /**
@@ -627,6 +753,10 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
                     performSeek(seekTo);
                     continue;
                 }
+                if (this.loopWrapPending) {
+                    wrapLoop();
+                    continue;
+                }
                 if (this.pauseAfterFirstFrame && !this.paused && hasPreloadFrame()) {
                     // A preload only needs its first frame, so stop the moment it exists - here on
                     // the decode thread, because the client thread that used to do the pausing can
@@ -668,6 +798,12 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
                         LOGGER.warn("Reading {} stopped: {}", this.file, errorString(read));
                     }
                     drainDecoders();
+                    if (loopActive()) {
+                        // The region runs to the end of the file: everything left in the decoders was
+                        // still inside it, so the wrap comes right after the last of it.
+                        this.loopWrapPending = true;
+                        continue;
+                    }
                     this.finished = true;
                     sleepUnchecked(20); // park at the end until a seek restarts playback
                     continue;
@@ -742,6 +878,19 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
                     avutil.av_frame_unref(this.swFrame);
                 }
                 continue;
+            }
+            if (pastLoopEnd(ptsMs)) {
+                // The first frame after the loop region: it is never shown - the region's start is.
+                // Whatever else the decoder holds lies past the region too; the wrap's seek flushes it.
+                if (source != this.frame) {
+                    avutil.av_frame_unref(this.swFrame);
+                }
+                this.loopWrapPending = true;
+                return;
+            }
+            if (this.reanchorOnNextFrame) {
+                this.reanchorOnNextFrame = false;
+                reanchorAfterLoop(ptsMs);
             }
             // Measured against the raw clock, not videoClockMs(): the output-latency compensation
             // pushes the presentation target behind the wall clock, and a frame merely waiting
@@ -1001,6 +1150,11 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
             // Stale samples from before a seek: the demuxer restarts at the nearest keyframe, which
             // can sit well before the seek target. Playing them would replay a snippet of the clip
             // (audible after every seek, and it made resync seeks never converge).
+            return;
+        }
+        if (ptsMs >= 0 && pastLoopEnd(ptsMs - this.frameDurationMs)) {
+            // Sound past the loop region: the demuxer reads it before the picture gets there, and it
+            // must not play out ahead of the wrap.
             return;
         }
         long durationMs = Math.round(converted * 1000.0 / this.audioOutRate);
@@ -1284,6 +1438,71 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         this.singleFrameAfterSeek = this.paused && this.videoCodecContext != null;
     }
 
+    /** Whether a loop region is set that the media can actually wrap to. */
+    private boolean loopActive() {
+        long start = this.loopStartMs;
+        return start >= 0L && (this.lengthMs <= 0L || start < this.lengthMs);
+    }
+
+    /** Whether a frame at this position lies past the loop region's end (half a frame of slack for rounding). */
+    private boolean pastLoopEnd(double ptsMs) {
+        long end = this.loopEndMs;
+        return end > 0L && loopActive() && ptsMs > end + this.frameDurationMs / 2.0;
+    }
+
+    /**
+     * Jumps from the end of the loop region back to its start. Unlike a seek from the client thread,
+     * the region's start follows exactly when its last frame has had its screen time - not up to a
+     * tick late, and not early because the decoder runs ahead of the screen. The seek itself is issued
+     * right away, while that last frame is still on screen: the decoder usually has to work its way
+     * up from a keyframe before the loop start, and that time is hidden behind the frame instead of
+     * holding it longer.
+     */
+    private void wrapLoop() {
+        this.loopWrapPending = false;
+        long target = this.loopStartMs;
+        if (this.closed || this.seekRequestMs >= 0L || target < 0L) {
+            return; // an explicit seek wins, and looping may have been turned off meanwhile
+        }
+        long now = System.nanoTime();
+        double remainingMs = this.lastVideoPtsMs >= 0L
+                ? this.lastVideoPtsMs + this.frameDurationMs - videoClockMs() : 0.0;
+        this.loopSeamNanos = now + (long) (Math.max(0.0, remainingMs) * 1_000_000L);
+        this.loopWrapNanos = now;
+        this.loopWrapFromMs = this.lastVideoPtsMs;
+        performSeek(target);
+        this.reanchorOnNextFrame = true;
+        this.loopCount++;
+    }
+
+    /**
+     * The region's first frame after a wrap is due at the seam (or right now, if re-entering the
+     * region took longer). The seek reset the clock to the loop start when it was issued, but the
+     * decoder then still had to work its way up from the keyframe before it (up to a whole GOP), and
+     * the output latency compensation pushes the picture further back: against that clock the frame
+     * would show too early, wait out the latency, or arrive late and make the picture race to catch
+     * up - all visible at the seam. Anchoring the clock on the frame keeps the timeline continuous.
+     */
+    private void reanchorAfterLoop(double ptsMs) {
+        long clock = (long) ptsMs + pictureLatencyMs();
+        long now = System.nanoTime();
+        long anchor = Math.max(now, this.loopSeamNanos);
+        this.clockOffsetMs = clock;
+        this.anchorNanos = anchor;
+        this.clockFloorMs = Long.MIN_VALUE;
+        if (this.useAudioClock) {
+            this.audioClockMs = clock;
+            this.audioClockStampNanos = anchor;
+        }
+        if (this.debug) {
+            LOGGER.info("Loop wrapped from {} ms back to {} ms (re-entering the region took {} ms, "
+                            + "{} ms of it hidden behind the last frame)",
+                    this.loopWrapFromMs, (long) ptsMs, (now - this.loopWrapNanos) / 1_000_000L,
+                    Math.min(now, this.loopSeamNanos) > this.loopWrapNanos
+                            ? (Math.min(now, this.loopSeamNanos) - this.loopWrapNanos) / 1_000_000L : 0L);
+        }
+    }
+
     /**
      * The clock the picture is paced against: the playback clock minus the configured output
      * latency compensation. {@link #audioLatencyMs} shifts the picture later by that amount -
@@ -1293,6 +1512,11 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
      * reported position visibly leads the sound that reaches the ears).
      */
     private long videoClockMs() {
+        return clockMs() - pictureLatencyMs();
+    }
+
+    /** How far {@link #videoClockMs} runs behind the playback clock. */
+    private long pictureLatencyMs() {
         long latencyMs = this.audioLatencyMs;
         if (!this.useAudioClock && this.audioOutput != null) {
             // Wall-clock pacing cannot see the output's own latency: a written sample first spends
@@ -1302,7 +1526,7 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
             // corrected twice.
             latencyMs += this.audioOutput.nominalLatencyMs();
         }
-        return clockMs() - latencyMs;
+        return latencyMs;
     }
 
     /**
@@ -1369,6 +1593,17 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     @Override
     public void seekMs(long positionMs) {
         this.seekRequestMs = Math.max(0L, positionMs);
+    }
+
+    @Override
+    public void setLoopRegion(long startMs, long endMs) {
+        this.loopEndMs = Math.max(0L, endMs);
+        this.loopStartMs = startMs;
+    }
+
+    @Override
+    public int loopCount() {
+        return this.loopCount;
     }
 
     @Override
@@ -1499,7 +1734,7 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     public void setDebugLogging(boolean debug) {
         this.debug = debug;
         if (FfmpegNativeLibrary.isAvailable()) {
-            avutil.av_log_set_level(debug ? avutil.AV_LOG_VERBOSE : avutil.AV_LOG_ERROR);
+            FfmpegLog.setLevel(debug ? avutil.AV_LOG_VERBOSE : avutil.AV_LOG_ERROR);
         }
     }
 
@@ -1644,10 +1879,16 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         // A native buffer read back after the call: BytePointer(byte[]) would only copy the Java
         // array into native memory, and the message written there never came back (every error
         // used to be logged as an empty string).
+        // getString() reads the buffer's whole capacity, so whatever the fresh allocation held past
+        // the message's terminator came along with it - cut there.
         BytePointer buffer = new BytePointer(128L);
         try {
-            return avutil.av_strerror(code, buffer, buffer.capacity()) < 0
-                    ? "error " + code : buffer.getString();
+            if (avutil.av_strerror(code, buffer, buffer.capacity()) < 0) {
+                return "error " + code;
+            }
+            String message = buffer.getString();
+            int end = message.indexOf('\0');
+            return end >= 0 ? message.substring(0, end) : message;
         } finally {
             buffer.releaseReference();
         }

@@ -69,8 +69,11 @@ public final class AuraIntroVideoManager {
 
     private static final AuraIntroVideoManager INSTANCE = new AuraIntroVideoManager();
 
+    /**
+     * The one video player: it plays the loading scene (held on its freeze frame while the game
+     * finishes loading) and then simply carries on as the title screen's intro.
+     */
     private VideoPlayer player = new FfmpegVideoPlayer();
-    private VideoPlayer backgroundPlayer = new FfmpegVideoPlayer();
 
     /**
      * The sound of a baked video, played by a player of its own.
@@ -123,10 +126,6 @@ public final class AuraIntroVideoManager {
 
     private boolean watchdogStarted;
     private boolean stallDumpReported;
-    /** Playback progress tracking: a video that stops delivering frames must not hold a scene. */
-    private long lastBackgroundFrameCount = -1L;
-    private long lastBackgroundProgressMs;
-    private boolean backgroundAbandoned;
     /** One-shot debug report of how many frames the loading scene's video really produces. */
     private boolean loadingFrameRateReported;
     /** One-shot report of the A/V offset while the loading scene plays. */
@@ -144,6 +143,8 @@ public final class AuraIntroVideoManager {
      * that): from then on the video is a silent background and the menu music has the floor.
      */
     private boolean loopedOnce;
+    /** The player's loop counter as last seen (-1: not yet looked at this session) - see handleEndBehaviour. */
+    private int loopCountSeen = -1;
     /** True while a persistent loop is paused because the title screen is not showing. */
     private boolean parkedAway;
     /** True while a persistent loop plays behind another menu (see loopInOtherMenus). */
@@ -197,7 +198,6 @@ public final class AuraIntroVideoManager {
     private boolean waitingForBackground;
     private long waitingSinceMs;
     private long backgroundStartMs;
-    private volatile long backgroundGeneration;
 
     private AuraIntroVideoManager() {
     }
@@ -236,7 +236,7 @@ public final class AuraIntroVideoManager {
         boolean introPlaying = (this.sessionActive || this.startRequested)
                 && !this.ended && !this.player.isFinished() && !this.loopedOnce;
         boolean backgroundPlaying = (this.backgroundActive || this.backgroundStartRequested)
-                && !this.backgroundPlayer.isFinished();
+                && !this.player.isFinished();
         return introPlaying || backgroundPlaying;
     }
 
@@ -277,7 +277,7 @@ public final class AuraIntroVideoManager {
         // slow game otherwise.
         if (cfg.general.debugLogging && this.backgroundActive && !this.backgroundStallReported
                 && Util.getMillis() - this.backgroundStartMs > 3000L && this.backgroundFramesUploaded == 0
-                && !this.backgroundPlayer.isFinished()) {
+                && !this.player.isFinished()) {
             this.backgroundStallReported = true;
             LOGGER.warn("Loading background video produced no frames {} ms after starting - "
                             + "decoding or scaling is stuck", Util.getMillis() - this.backgroundStartMs);
@@ -286,8 +286,8 @@ public final class AuraIntroVideoManager {
         // Pause the preloaded background video on its first frame. The player normally pauses
         // itself the moment that frame exists (see FfmpegVideoPlayer's decode loop) - this stays
         // as the fallback for a player that did not, and for the debug log line.
-        if (this.backgroundPlayer.consumePauseAfterFirstFrame()) {
-            this.backgroundPlayer.setPaused(true);
+        if (this.player.consumePauseAfterFirstFrame()) {
+            this.player.setPaused(true);
             if (cfg.general.debugLogging) {
                 LOGGER.info("Loading background video preloaded (first frame ready, paused)");
             }
@@ -313,7 +313,7 @@ public final class AuraIntroVideoManager {
             this.failed = false;
             this.sessionStartFailures++;
             this.lastSessionFailureMs = Util.getMillis();
-            this.t0Ms = Util.getMillis() + cfg.timing.videoStartDelayMs;
+            this.t0Ms = Util.getMillis();
             if (cfg.general.debugLogging) {
                 LOGGER.info("Retrying the video intro start (attempt {})", this.sessionStartFailures + 1);
             }
@@ -359,12 +359,12 @@ public final class AuraIntroVideoManager {
                     this.waitingForBackground = true;
                     this.waitingSinceMs = Util.getMillis();
                     if (cfg.general.debugLogging) {
-                        LOGGER.info("Loading finished - waiting for the loading background video to finish first");
+                        LOGGER.info("Loading finished - waiting for the video to reach the hold frame first");
                     }
                 }
             } else {
                 if (this.waitingForBackground && cfg.general.debugLogging) {
-                    LOGGER.info("Continuing without waiting for the loading background video");
+                    LOGGER.info("Continuing - the video reached the hold frame (or waiting is off or gave up)");
                 }
                 this.waitingForBackground = false;
                 anchor(cfg, loadingOverlay);
@@ -383,10 +383,6 @@ public final class AuraIntroVideoManager {
             maybeStartLoadingBackground(cfg);
         } else if (this.backgroundActive || this.backgroundStartRequested) {
             stopLoadingBackground(minecraft);
-        }
-
-        if (this.backgroundActive && this.backgroundPlayer != this.player) {
-            handleBackgroundEndBehaviour(cfg);
         }
 
         if (!this.sessionActive) {
@@ -535,7 +531,8 @@ public final class AuraIntroVideoManager {
      * trigger it.</p>
      */
     private void resyncAudioToPicture(AuraIntroConfig cfg) {
-        if (!usesSeparateAudioPlayer(cfg)
+        // After a loop's first wrap the sound is muted for good: nothing left to keep in sync.
+        if (!usesSeparateAudioPlayer(cfg) || this.loopedOnce
                 || (!this.backgroundActive && !this.sessionActive)) {
             this.audioResyncSinceMs = -1L;
             return;
@@ -635,10 +632,9 @@ public final class AuraIntroVideoManager {
             // file (each with its own decoder and video output) is what crashed natively.
             // Its sound comes either from that player itself (one clock, no drift, but the sound shares the
             // video's demux) or from the separate audio-only player - see the audioPlayer field.
-            this.backgroundPlayer = cfg.video.audioInSamePlayer
+            this.player = cfg.video.audioInSamePlayer
                     ? new FfmpegVideoPlayer()
                     : FfmpegVideoPlayer.silentVideo();
-            this.player = this.backgroundPlayer;
         }
         preloadLoadingBackground();
     }
@@ -700,16 +696,16 @@ public final class AuraIntroVideoManager {
         replaceClosedPlayers();
         // The loading scene is a background: dropping its alpha happens on the decode thread, which
         // is far cheaper than masking every 4K frame on the render thread.
-        this.backgroundPlayer.sink().setForceOpaque(true);
+        this.player.sink().setForceOpaque(true);
         this.backgroundPreloadRequested = true;
         Thread thread = new Thread(() -> {
-            this.backgroundPlayer.setDebugLogging(cfg.general.debugLogging);
-            this.backgroundPlayer.setHardwareDecoding(cfg.video.hardwareDecoding);
-            this.backgroundPlayer.setAudioLatencyMs(cfg.video.audioLatencyMs);
-            this.backgroundPlayer.setAudioDevice(cfg.video.videoAudioDevice);
+            this.player.setDebugLogging(cfg.general.debugLogging);
+            this.player.setHardwareDecoding(cfg.video.hardwareDecoding);
+            this.player.setAudioLatencyMs(cfg.video.audioLatencyMs);
+            this.player.setAudioDevice(cfg.video.videoAudioDevice);
             // Volume 0: the preload decodes the first frame while the game is still starting up, and
             // playing the audio there would be heard long before anything is on screen.
-            boolean ok = this.backgroundPlayer.preload(path, 0);
+            boolean ok = this.player.preload(path, 0);
             if (usesSeparateAudioPlayer(cfg)) {
                 // Silent again (volume 0) and paused on its first samples, so it cannot run ahead of the
                 // loading scene that will play it either.
@@ -739,8 +735,8 @@ public final class AuraIntroVideoManager {
             // from the preloaded first frame (isPreloaded() below).
             return;
         }
-        if (this.backgroundPlayer.isPreloaded()) {
-            if (!this.backgroundPlayer.isPreloadParked()
+        if (this.player.isPreloaded()) {
+            if (!this.player.isPreloadParked()
                     && (this.loadingOverlayFirstSeenMs == 0L
                         || Util.getMillis() - this.loadingOverlayFirstSeenMs < 5000L)) {
                 // The preload is still decoding its first frame. Resume it once it is actually
@@ -754,23 +750,20 @@ public final class AuraIntroVideoManager {
             this.backgroundFrozen = false;
             this.backgroundActive = true;
             this.loadingLayerRetired = false;
-            this.backgroundAbandoned = false;
-            this.lastBackgroundFrameCount = -1L;
-            this.lastBackgroundProgressMs = this.backgroundStartMs;
             // The preload parks on its first frame by itself (the decode thread pauses as soon as
             // that frame exists), so it is normally still at the very start of the clip. Should it
             // ever have run noticeably ahead anyway, restart at the beginning for the visible
             // playback - seeking flushes the decoder and briefly freezes the picture, so it is the
             // safety net, not the normal path.
-            long preloadPositionMs = this.backgroundPlayer.cachedTimeMs();
+            long preloadPositionMs = this.player.cachedTimeMs();
             boolean restartFromStart = preloadPositionMs > 300L;
             if (restartFromStart) {
-                this.backgroundPlayer.seekMs(0L);
+                this.player.seekMs(0L);
             }
             // The volume was forced to 0 for the silent preload - apply the configured one before
             // resuming, so the very first chunk the audio thread writes is already audible.
-            this.backgroundPlayer.setVolume(cfg.video.videoVolume);
-            this.backgroundPlayer.resumeFromPreload();
+            this.player.setVolume(cfg.video.videoVolume);
+            this.player.resumeFromPreload();
             if (usesSeparateAudioPlayer(cfg)) {
                 this.audioPlayer.setVolume(cfg.video.videoVolume);
                 this.audioPlayer.resumeFromPreload();
@@ -797,15 +790,21 @@ public final class AuraIntroVideoManager {
             return;
         }
 
+        if (this.backgroundPlayedOnce && !this.player.isClosed()) {
+            // A replay while the previous intro still owns the player (a persistent loop, a frozen last
+            // frame): starting it again under its own running decode thread crashed natively. End that
+            // intro and start over on a fresh player.
+            stopSession(Minecraft.getInstance());
+            this.player.close();
+        }
         this.backgroundStartRequested = true;
         this.backgroundPlayedOnce = true;
         this.loadingLayerRetired = false;
         this.backgroundStartMs = Util.getMillis();
         this.backgroundFrozen = false;
         this.backgroundFramesUploaded = 0L;
-        long generation = ++this.backgroundGeneration;
         replaceClosedPlayers();
-        VideoPlayer background = this.backgroundPlayer;
+        VideoPlayer background = this.player;
         // A background, like the preloaded one (see preloadLoadingBackground) - which a replay replaces.
         background.sink().setForceOpaque(true);
         Thread thread = new Thread(() -> {
@@ -817,10 +816,6 @@ public final class AuraIntroVideoManager {
             if (ok && usesSeparateAudioPlayer(cfg)) {
                 configureAudioPlayer(cfg);
                 this.audioPlayer.start(path, cfg.video.videoVolume);
-            }
-            if (this.backgroundGeneration != generation) {
-                background.close();
-                return;
             }
             synchronized (this) {
                 this.backgroundStartRequested = false;
@@ -844,54 +839,17 @@ public final class AuraIntroVideoManager {
         this.audioPlayer.setAudioDevice(cfg.video.videoAudioDevice);
     }
 
-    /** Freezes on the last frame (default) or loops, depending on the config. */
-    private void handleBackgroundEndBehaviour(AuraIntroConfig cfg) {
-        boolean finished = this.backgroundPlayer.isFinished() || this.backgroundAbandoned;
-        if (!finished) {
-            return;
-        }
-        if (cfg.loadingBackground.loop && !this.backgroundAbandoned) {
-            this.backgroundPlayer.seekMs(0L);
-            return;
-        }
-        if (!this.backgroundFrozen) {
-            this.backgroundFrozen = true;
-            if (!this.backgroundAbandoned) {
-                // Pausing a player that stopped advancing is pointless (and can block), so the frozen
-                // flag is enough in that case.
-                this.backgroundPlayer.setPaused(true);
-            }
-            if (cfg.general.debugLogging) {
-                long playedMs = Math.max(1L, Util.getMillis() - this.backgroundStartMs);
-                LOGGER.info("Loading background video ended - holding its last frame "
-                                + "({} frames in {} ms, {} fps)",
-                        this.backgroundFramesUploaded, playedMs,
-                        this.backgroundFramesUploaded * 1000L / playedMs);
-            }
-        }
-    }
-
+    /**
+     * Ends the loading phase's bookkeeping. The player itself keeps running - it is the intro's player
+     * too, and the hand-over must not stop it - but the loading layer's texture is never drawn again
+     * (see loadingLayerRetired) and is let go; a replay builds a new one on its first frame.
+     */
     private void stopLoadingBackground(Minecraft minecraft) {
         this.waitingForBackground = false;
-        if (this.backgroundPlayer == this.player) {
-            // Baked video: the loading scene and the intro share one player, so the hand-over must not
-            // stop it - only the loading phase's bookkeeping ends here.
-            this.backgroundActive = false;
-            this.backgroundStartRequested = false;
-            return;
-        }
-        boolean wasActive = this.backgroundActive || this.backgroundStartRequested
-                || this.backgroundPlayer.isPreloaded();
-        this.backgroundGeneration++;
-        this.backgroundStartRequested = false;
         this.backgroundActive = false;
-        this.backgroundFailed = false;
-        this.backgroundFrozen = false;
-        if (minecraft != null) {
+        this.backgroundStartRequested = false;
+        if (minecraft != null && this.loadingLayerRetired) {
             this.backgroundTexture.release(minecraft.getTextureManager());
-        }
-        if (wasActive) {
-            this.backgroundPlayer.close();
         }
     }
 
@@ -931,7 +889,7 @@ public final class AuraIntroVideoManager {
 
     private void drawLoadingBackgroundNow(GuiGraphicsExtractor graphics) {
         AuraIntroConfig cfg = AuraIntroConfigHolder.get();
-        VideoPlayer player = this.backgroundPlayer;
+        VideoPlayer player = this.player;
         if (!cfg.general.enabled || !cfg.loadingBackground.enabled || this.backgroundFailed
                 || this.loadingLayerRetired || graphics == null || player == null) {
             return;
@@ -1000,9 +958,9 @@ public final class AuraIntroVideoManager {
         // (see loadingLayerRetired), so its frozen hold frame cannot reappear over the title screen.
         this.loadingLayerRetired = true;
         traceHandOver("loading layer retired", "the title screen owns the video from here");
-        this.t0Ms = Util.getMillis() + cfg.timing.videoStartDelayMs;
+        this.t0Ms = Util.getMillis();
         if (cfg.general.debugLogging) {
-            LOGGER.info("Loading finished - video intro starts after a {} ms delay", cfg.timing.videoStartDelayMs);
+            LOGGER.info("Loading finished - the video intro starts");
         }
         if (isBakedVideo(cfg)) {
             // One player serves both scenes: it is already playing (held on the freeze frame), so the
@@ -1148,12 +1106,27 @@ public final class AuraIntroVideoManager {
 
     private void handleEndBehaviour(AuraIntroConfig cfg) {
         if (!this.ended) {
+            boolean looping = cfg.timing.endBehaviour == AuraIntroConfig.EndBehaviour.LOOP_REGION;
+            // The player wraps the region itself, on its decode thread: frame-exact at the region's
+            // end, where a seek from here came up to a tick late - and early by however far the
+            // decoder runs ahead of the screen. Set every tick, so a config change applies at once.
+            this.player.setLoopRegion(looping ? cfg.timing.loopStartMs : -1L, cfg.timing.loopEndMs);
             switch (cfg.timing.endBehaviour) {
                 case LOOP_REGION -> {
-                    long loopEnd = cfg.timing.loopEndMs > 0 ? cfg.timing.loopEndMs : this.player.lengthMs();
-                    if (this.introEnded() || (loopEnd > 0L && this.player.timeMs() >= loopEnd)) {
+                    int loops = this.player.loopCount();
+                    if (this.loopCountSeen < 0) {
+                        this.loopCountSeen = loops;
+                    }
+                    if (loops != this.loopCountSeen) {
+                        this.loopCountSeen = loops;
+                        // The decoder has to work its way back up from a keyframe after the wrap.
+                        restartIntroWatchdogs();
+                        enterSilentLoop(cfg);
+                    } else if (this.player.isFinished() || this.introEndedEarly) {
+                        // Fallback for a backend that stopped instead of wrapping. Not introEnded():
+                        // its "last half second counts as the end" would cut the region short.
                         this.player.seekMs(cfg.timing.loopStartMs);
-                        // A watchdog that tripped at the end would otherwise keep introEnded() true
+                        // A watchdog that tripped at the end would otherwise keep introEndedEarly true
                         // and seek back to the loop start on every tick from here on.
                         restartIntroWatchdogs();
                         enterSilentLoop(cfg);
@@ -1200,30 +1173,22 @@ public final class AuraIntroVideoManager {
     }
 
     /**
-     * Tears the intro session down and starts it again from the beginning. Used when the player started
-     * without ever producing a frame.
-     */
-    /**
      * A closed player can never be opened again - its teardown runs on a thread of its own - so a
-     * restart or a replay starts on a fresh player of the same kind in its place. One player serving
-     * both scenes of a baked video stays one player.
+     * restart or a replay starts on a fresh player of the same kind in its place.
      */
     private void replaceClosedPlayers() {
         if (this.player.isClosed()) {
-            VideoPlayer fresh = this.player.fresh();
-            if (this.backgroundPlayer == this.player) {
-                this.backgroundPlayer = fresh;
-            }
-            this.player = fresh;
-        }
-        if (this.backgroundPlayer.isClosed()) {
-            this.backgroundPlayer = this.backgroundPlayer.fresh();
+            this.player = this.player.fresh();
         }
         if (this.audioPlayer.isClosed()) {
             this.audioPlayer = this.audioPlayer.fresh();
         }
     }
 
+    /**
+     * Tears the intro session down and starts it again from the beginning. Used when the player started
+     * without ever producing a frame.
+     */
     private void restartIntroSession(Minecraft minecraft, AuraIntroConfig cfg) {
         LoadingOverlay anchored = this.anchoredOverlay;
         stopSession(minecraft);
@@ -1238,7 +1203,7 @@ public final class AuraIntroVideoManager {
         this.introEndedEarly = false;
         this.lastIntroFrameCount = -1L;
         this.lastIntroProgressMs = this.anchorSetMs;
-        this.t0Ms = Util.getMillis() + cfg.timing.videoStartDelayMs;
+        this.t0Ms = Util.getMillis();
         if (!beginSession(cfg)) {
             this.failed = true;
             this.lastSessionFailureMs = Util.getMillis();
@@ -1264,6 +1229,7 @@ public final class AuraIntroVideoManager {
         this.failed = false;
         this.endFadeStartMs = -1L;
         this.loopedOnce = false;
+        this.loopCountSeen = -1;
         this.parkedAway = false;
         this.loopInMenus = false;
         if (minecraft != null) {
@@ -1329,7 +1295,7 @@ public final class AuraIntroVideoManager {
      * reached its end yet (and the config asks for the next scene to wait for it).
      */
     private boolean shouldWaitForBackgroundVideo(AuraIntroConfig cfg) {
-        if (!cfg.loadingBackground.enabled || !cfg.loadingBackground.waitForVideoToFinish
+        if (!cfg.loadingBackground.enabled || !cfg.loadingBackground.waitUntilHoldMsReached
                 || this.backgroundFailed) {
             return false;
         }
@@ -1339,7 +1305,7 @@ public final class AuraIntroVideoManager {
             // non-preload path, which used to keep this wait alive forever.
             return false;
         }
-        if (this.backgroundPlayer.isFinished() || this.backgroundAbandoned || this.backgroundFrozen) {
+        if (this.player.isFinished() || this.backgroundFrozen) {
             return false;
         }
         int maxWait = cfg.loadingBackground.maxWaitForVideoMs;
@@ -1401,10 +1367,10 @@ public final class AuraIntroVideoManager {
         if (!this.backgroundActive && !this.sessionActive) {
             return;
         }
-        LOGGER.info("Heartbeat: loading {} produced / {} drawn, intro {} produced / {} drawn, alpha {}, "
+        LOGGER.info("Heartbeat: {} frames produced, {} drawn while loading / {} on the title screen, alpha {}, "
                         + "picture {} ms, sound {} (backgroundActive={} sessionActive={} frozen={} ended={})",
-                this.backgroundPlayer.sink().producedFrames(), this.backgroundFramesUploaded,
-                this.player.sink().producedFrames(), this.introFramesUploaded, videoAlpha(cfg),
+                this.player.sink().producedFrames(), this.backgroundFramesUploaded,
+                this.introFramesUploaded, videoAlpha(cfg),
                 this.player.cachedTimeMs(),
                 this.audioPlayer.cachedTimeMs() < 0L ? "n/a" : Long.toString(this.audioPlayer.cachedTimeMs()),
                 this.backgroundActive, this.sessionActive, this.backgroundFrozen, this.ended);
@@ -1444,9 +1410,9 @@ public final class AuraIntroVideoManager {
         // Freeze-frame hold for a single baked video: pause the loading scene at the configured frame so
         // the game can finish loading, then continue from that frame as the intro.
         if (this.backgroundActive && !this.backgroundFrozen && cfg.loadingBackground.holdAtMs > 0
-                && this.backgroundPlayer.cachedTimeMs() >= cfg.loadingBackground.holdAtMs) {
+                && this.player.cachedTimeMs() >= cfg.loadingBackground.holdAtMs) {
             this.backgroundFrozen = true;
-            this.backgroundPlayer.setPaused(true);
+            this.player.setPaused(true);
             if (usesSeparateAudioPlayer(cfg)) {
                 // The sound stops with the picture while the game finishes loading.
                 this.audioPlayer.setPaused(true);
@@ -1454,7 +1420,7 @@ public final class AuraIntroVideoManager {
                 // is only paid when playback resumes. Parking both on the very same frame is what keeps
                 // them together afterwards: the picture and the sound are separate players with their own
                 // clocks, so their positions have to be equalised while there is a chance to do it.
-                this.backgroundPlayer.seekMs(cfg.loadingBackground.holdAtMs);
+                this.player.seekMs(cfg.loadingBackground.holdAtMs);
                 this.audioPlayer.seekMs(cfg.loadingBackground.holdAtMs);
                 reportSync("freeze frame");
             }
@@ -1469,7 +1435,7 @@ public final class AuraIntroVideoManager {
         // one in software, for example) shows up here first: frames trickle in, the picture stutters and the
         // audio needs the same CPU, so this is the number that explains both.
         if (this.backgroundActive && !this.backgroundFrozen && !this.loadingFrameRateReported) {
-            long produced = this.backgroundPlayer.sink().producedFrames();
+            long produced = this.player.sink().producedFrames();
             if (this.loadingFpsBaseline < 0L) {
                 this.loadingFpsBaseline = produced;
                 this.loadingFpsBaselineMs = now;
@@ -1488,19 +1454,6 @@ public final class AuraIntroVideoManager {
                     LOGGER.info("Loading video is playing at {} fps ({} frames produced, {} drawn in {} ms)",
                             fps, frames, this.backgroundFramesUploaded, elapsedMs);
                 }
-            }
-        }
-
-        if (this.backgroundPlayer != this.player && this.backgroundActive && !this.backgroundFrozen) {
-            long produced = this.backgroundPlayer.sink().producedFrames();
-            if (produced != this.lastBackgroundFrameCount) {
-                this.lastBackgroundFrameCount = produced;
-                this.lastBackgroundProgressMs = now;
-            } else if (!this.backgroundAbandoned
-                    && now - this.lastBackgroundProgressMs > PLAYBACK_STALL_MS) {
-                this.backgroundAbandoned = true;
-                LOGGER.warn("Loading background video stopped delivering frames after {} frames - "
-                        + "continuing without it", this.backgroundFramesUploaded);
             }
         }
 
@@ -2009,7 +1962,7 @@ public final class AuraIntroVideoManager {
             this.introFramesUploaded++;
             if (!this.timelineLocked) {
                 this.timelineLocked = true;
-                this.t0Ms = Util.getMillis() + cfg.timing.videoStartDelayMs;
+                this.t0Ms = Util.getMillis();
                 if (cfg.general.debugLogging) {
                     LOGGER.info("Video intro timeline starts now (first frame on screen; all intro timings "
                             + "are measured from here)");
