@@ -35,13 +35,13 @@ public abstract class LoadingOverlayMixin {
             at = @At(value = "INVOKE",
                     target = "Lnet/minecraft/client/gui/screens/LoadingOverlay;isReadyToFadeOut()Z"))
     private boolean auraintro$holdOverlay(boolean original) {
-        return original && !AuraIntroVideoManager.get().shouldHoldOverlay();
+        return original && !AuraIntroVideoManager.get().shouldHoldOverlay((LoadingOverlay) (Object) this);
     }
 
     @WrapMethod(method = "extractProgressBar")
     private void auraintro$progressBarAlpha(GuiGraphicsExtractor graphics, int x0, int y0, int x1, int y1,
                                               float fade, Operation<Void> original) {
-        float overridden = AuraIntroVideoManager.get().progressBarAlpha(fade);
+        float overridden = AuraIntroVideoManager.get().progressBarAlpha((LoadingOverlay) (Object) this, fade);
         original.call(graphics, x0, y0, x1, y1, overridden);
     }
 
@@ -87,6 +87,6 @@ public abstract class LoadingOverlayMixin {
     @Inject(method = "extractRenderState", at = @At("TAIL"))
     private void auraintro$drawIntroVideo(GuiGraphicsExtractor graphics, int mouseX, int mouseY,
                                             float partialTick, CallbackInfo ci) {
-        AuraIntroVideoManager.get().drawIntroVideo(graphics);
+        AuraIntroVideoManager.get().drawIntroVideo((LoadingOverlay) (Object) this, graphics);
     }
 }

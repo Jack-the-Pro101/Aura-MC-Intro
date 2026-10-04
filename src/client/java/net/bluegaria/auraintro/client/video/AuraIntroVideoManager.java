@@ -1271,11 +1271,20 @@ public final class AuraIntroVideoManager {
     }
 
     /**
+     * Whether {@code overlay} is the loading screen the intro took over. A later resource reload (from the
+     * pack screen, say) gets a fresh overlay while a persistent loop keeps the intro anchored, and that one
+     * has to stay vanilla: loading bar visible, no video drawn over it.
+     */
+    private boolean isIntroOverlay(LoadingOverlay overlay) {
+        return overlay != null && overlay == this.anchoredOverlay;
+    }
+
+    /**
      * Consulted by {@link net.bluegaria.auraintro.mixin.client.LoadingOverlayMixin}:
      * while this returns {@code true} vanilla is not allowed to start fading the overlay out, so
      * the Mojang logo stays on screen until the configured video timestamp.
      */
-    public boolean shouldHoldOverlay() {
+    public boolean shouldHoldOverlay(LoadingOverlay overlay) {
         AuraIntroConfig cfg = AuraIntroConfigHolder.get();
         if (!cfg.general.enabled) {
             return false;
@@ -1284,7 +1293,7 @@ public final class AuraIntroVideoManager {
             // Keep the loading screen (and its background video) up until the clip is done.
             return true;
         }
-        if (cfg.timing.overlayUnloadAtMs <= 0 || !holdingEligible()) {
+        if (cfg.timing.overlayUnloadAtMs <= 0 || !holdingEligible() || !isIntroOverlay(overlay)) {
             return false;
         }
         return videoTimeMs() < cfg.timing.overlayUnloadAtMs;
@@ -1540,9 +1549,10 @@ public final class AuraIntroVideoManager {
      * Progress bar alpha. {@code vanillaFade} is returned whenever the overlay is not under our
      * control, so vanilla behaviour is fully preserved if the mod is disabled or the video failed.
      */
-    public float progressBarAlpha(float vanillaFade) {
+    public float progressBarAlpha(LoadingOverlay overlay, float vanillaFade) {
         AuraIntroConfig cfg = AuraIntroConfigHolder.get();
-        if (!cfg.general.enabled || !holdingEligible() || cfg.timing.overlayUnloadAtMs <= 0) {
+        if (!cfg.general.enabled || !holdingEligible() || cfg.timing.overlayUnloadAtMs <= 0
+                || !isIntroOverlay(overlay)) {
             return vanillaFade;
         }
         long time = videoTimeMs();
@@ -1915,6 +1925,14 @@ public final class AuraIntroVideoManager {
      * its alpha is dropped by the player's frame sink), so the hand-over is not a visible switch.</p>
      */
     public void drawIntroVideo(GuiGraphicsExtractor graphics) {
+        guard("drawing the intro video", () -> drawIntroVideoNow(graphics));
+    }
+
+    /** The intro layer on top of a loading overlay - only the one the intro took over (see isIntroOverlay). */
+    public void drawIntroVideo(LoadingOverlay overlay, GuiGraphicsExtractor graphics) {
+        if (!isIntroOverlay(overlay)) {
+            return;
+        }
         guard("drawing the intro video", () -> drawIntroVideoNow(graphics));
     }
 
