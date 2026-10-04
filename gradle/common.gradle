@@ -320,8 +320,8 @@ java {
 }
 
 jar {
-    from("LICENSE") {
-        rename { "${it}_${project.archives_base_name}" }
+    from(rootProject.file("LICENSE.txt")) {
+        rename { "LICENSE_${project.archives_base_name}.txt" }
     }
 }
 
