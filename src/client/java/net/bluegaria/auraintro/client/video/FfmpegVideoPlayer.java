@@ -11,6 +11,7 @@ import org.bytedeco.ffmpeg.avutil.AVChannelLayout;
 import org.bytedeco.ffmpeg.avutil.AVDictionary;
 import org.bytedeco.ffmpeg.avutil.AVFrame;
 import org.bytedeco.ffmpeg.avutil.AVRational;
+import org.bytedeco.ffmpeg.avutil.Free_Pointer_BytePointer;
 import org.bytedeco.ffmpeg.global.avcodec;
 import org.bytedeco.ffmpeg.global.avformat;
 import org.bytedeco.ffmpeg.global.avutil;
@@ -19,8 +20,8 @@ import org.bytedeco.ffmpeg.global.swscale;
 import org.bytedeco.ffmpeg.swresample.SwrContext;
 import org.bytedeco.ffmpeg.swscale.SwsContext;
 import org.bytedeco.javacpp.BytePointer;
-import org.bytedeco.javacpp.DoublePointer;
 import org.bytedeco.javacpp.Loader;
+import org.bytedeco.javacpp.Pointer;
 import org.bytedeco.javacpp.PointerPointer;
 import org.lwjgl.system.MemoryUtil;
 import org.slf4j.Logger;
@@ -117,6 +118,22 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
      * than played late - played-late audio accumulates into a permanent desync.
      */
     private static final long STALE_AUDIO_MS = 40L;
+
+    /**
+     * Threads for the RGBA conversion. Scaling a 4K picture down to the window costs several ms on one
+     * core and well under one on eight; past that the slices get too thin to gain anything.
+     */
+    private static final int SCALER_THREADS = Math.max(1, Math.min(8, Runtime.getRuntime().availableProcessors() / 2));
+
+    /**
+     * The free callback of the buffer references that wrap the sink's staging buffers for the scaler:
+     * the sink owns that memory, so dropping the last reference must not free it.
+     */
+    private static final Free_Pointer_BytePointer KEEP_BUFFER = new Free_Pointer_BytePointer() {
+        @Override
+        public void call(Pointer opaque, BytePointer data) {
+        }
+    };
 
     public FfmpegVideoPlayer() {
         this(Mode.VIDEO);
@@ -244,9 +261,24 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
      */
     private final long[] rgbaTargetAddresses = {-1L, -1L, -1L};
     private final BytePointer[] rgbaTargets = new BytePointer[3];
+    /**
+     * The same buffers as FFmpeg buffer references, which the threaded conversion requires of its
+     * destination frame (see presentFrame). They never free the memory - see {@link #KEEP_BUFFER}.
+     */
+    private final AVBufferRef[] rgbaTargetRefs = new AVBufferRef[3];
     private int rgbaTargetSlot;
-    /** Whether the freshly allocated rgba frame still needs its pointers/linesizes filled in. */
-    private boolean rgbaFrameNeedsFill = true;
+
+    // Debug logging: where the decode thread's time per frame goes, summed up every ~5 s.
+    private long statsSinceNanos;
+    private int statsFrames;
+    private int statsSkipped;
+    private int statsLate;
+    private long statsDecodeNanos;
+    private long statsDownloadNanos;
+    private long statsDownloadMaxNanos;
+    private long statsConvertNanos;
+    private long statsConvertMaxNanos;
+    private long statsWaitNanos;
 
     private SwrContext swrContext;
     private int swrInFormat = -1;
@@ -840,7 +872,9 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     }
 
     private void decodeVideoPacket() {
+        long start = System.nanoTime();
         int ret = avcodec.avcodec_send_packet(this.videoCodecContext, this.packet);
+        this.statsDecodeNanos += System.nanoTime() - start;
         if (ret < 0 && ret != AVERROR_EAGAIN) {
             LOGGER.warn("The video decoder rejected a packet of {}: {}", this.file, errorString(ret));
             return;
@@ -850,14 +884,21 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
 
     private void receiveVideoFrames() {
         while (!this.closed) {
+            long receiveStart = System.nanoTime();
             int ret = avcodec.avcodec_receive_frame(this.videoCodecContext, this.frame);
+            this.statsDecodeNanos += System.nanoTime() - receiveStart;
             if (ret < 0) {
                 // EAGAIN: the decoder wants more input; a negative value at the end: drained.
                 return;
             }
             AVFrame source = this.frame;
             if (this.hwActive && this.frame.format() == this.hwPixFmt) {
-                if (!downloadHwFrame(this.frame)) {
+                long downloadStart = System.nanoTime();
+                boolean downloaded = downloadHwFrame(this.frame);
+                long downloadNanos = System.nanoTime() - downloadStart;
+                this.statsDownloadNanos += downloadNanos;
+                this.statsDownloadMaxNanos = Math.max(this.statsDownloadMaxNanos, downloadNanos);
+                if (!downloaded) {
                     continue;
                 }
                 source = this.swFrame;
@@ -908,6 +949,7 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
                     avutil.av_frame_unref(this.swFrame);
                 }
                 this.lastVideoPtsMs = (long) ptsMs;
+                this.statsSkipped++;
                 continue;
             }
             presentFrame(source, ptsMs);
@@ -916,7 +958,49 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
             }
             this.lastVideoPtsMs = (long) ptsMs;
             this.cachedTimeMs = (long) ptsMs;
+            debugPipelineStats();
         }
+    }
+
+    /**
+     * One line every ~5 s with what the decode thread spent its time on, per frame: waiting for the
+     * decoder, downloading GPU frames, converting to RGBA, and holding finished frames until their
+     * time. A frame is late when it was ready only after its time had come - that is the stutter.
+     */
+    private void debugPipelineStats() {
+        if (!this.debug) {
+            return;
+        }
+        long now = System.nanoTime();
+        if (this.statsSinceNanos == 0L) {
+            this.statsSinceNanos = now;
+        }
+        if (now - this.statsSinceNanos < 5_000_000_000L || this.statsFrames == 0) {
+            return;
+        }
+        double frames = this.statsFrames;
+        LOGGER.info("Video pipeline ({}): {} frames in {} ms ({} late, {} skipped) - per frame: "
+                        + "decode {} ms, GPU download {} ms (max {}), RGBA conversion {} ms (max {}), "
+                        + "waiting for its time {} ms",
+                this.hwActive ? "hardware decoding" : "software decoding",
+                this.statsFrames, (now - this.statsSinceNanos) / 1_000_000L, this.statsLate, this.statsSkipped,
+                ms(this.statsDecodeNanos / frames), ms(this.statsDownloadNanos / frames),
+                ms(this.statsDownloadMaxNanos), ms(this.statsConvertNanos / frames),
+                ms(this.statsConvertMaxNanos), ms(this.statsWaitNanos / frames));
+        this.statsSinceNanos = now;
+        this.statsFrames = 0;
+        this.statsSkipped = 0;
+        this.statsLate = 0;
+        this.statsDecodeNanos = 0L;
+        this.statsDownloadNanos = 0L;
+        this.statsDownloadMaxNanos = 0L;
+        this.statsConvertNanos = 0L;
+        this.statsConvertMaxNanos = 0L;
+        this.statsWaitNanos = 0L;
+    }
+
+    private static String ms(double nanos) {
+        return String.format(java.util.Locale.ROOT, "%.1f", nanos / 1_000_000.0);
     }
 
     private void presentFrame(AVFrame src, double ptsMs) {
@@ -953,21 +1037,38 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         if (target == null) {
             return;
         }
+        long convertStart = System.nanoTime();
         target.clear();
-        BytePointer targetPointer = rgbaTargetPointer(target);
-        if (this.rgbaFrameNeedsFill) {
-            // Only a freshly allocated rgba frame needs its pointers and linesizes computed; for a
-            // frame of unchanged size re-pointing data[0] at the rotating buffer is all it takes.
-            this.rgbaFrameNeedsFill = false;
-            avutil.av_image_fill_arrays(this.rgbaFrame.data(), this.rgbaFrame.linesize(),
-                    targetPointer, avutil.AV_PIX_FMT_RGBA, outWidth, outHeight, 1);
-        } else {
-            this.rgbaFrame.data().put(0, targetPointer);
+        int slot = rgbaTargetSlot(target);
+        // The threaded conversion (sws_scale_frame - plain sws_scale only ever uses one thread)
+        // takes its destination as a reference-counted frame: one more reference to the staging
+        // buffer for the duration of the call, dropped again by the unref below.
+        AVFrame rgba = this.rgbaFrame;
+        rgba.format(avutil.AV_PIX_FMT_RGBA);
+        rgba.width(outWidth);
+        rgba.height(outHeight);
+        rgba.data(0, this.rgbaTargets[slot]);
+        rgba.linesize(0, outWidth * 4);
+        rgba.buf(0, avutil.av_buffer_ref(this.rgbaTargetRefs[slot]));
+        int ret = swscale.sws_scale_frame(this.swsContext, rgba, src);
+        avutil.av_frame_unref(rgba);
+        if (ret < 0) {
+            if (this.debug) {
+                LOGGER.warn("Converting a frame of {} failed: {}", this.file, errorString(ret));
+            }
+            return;
         }
-        swscale.sws_scale(this.swsContext, src.data(), src.linesize(),
-                0, height, this.rgbaFrame.data(), this.rgbaFrame.linesize());
         this.sink.processAlpha(target, outWidth * outHeight);
+        long convertNanos = System.nanoTime() - convertStart;
+        this.statsConvertNanos += convertNanos;
+        this.statsConvertMaxNanos = Math.max(this.statsConvertMaxNanos, convertNanos);
+        this.statsFrames++;
+        if (ptsMs < videoClockMs() - this.frameDurationMs) {
+            this.statsLate++;
+        }
+        long waitStart = System.nanoTime();
         awaitPresentationTime(ptsMs);
+        this.statsWaitNanos += System.nanoTime() - waitStart;
         this.sink.commitFrame(outWidth, outHeight);
         this.firstFrameSeen = true;
         this.firstVideoFrameSeen = true;
@@ -999,48 +1100,71 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     }
 
     /**
-     * The cached wrapper of the given staging buffer, created the first time that buffer turns up
-     * in the rotation. JavaCPP's {@code Pointer} has no address setter, so re-pointing one wrapper
-     * is not an option - but three wrappers cover the three rotating buffers, and after that no
-     * frame allocates anything.
+     * The slot of the cached wrappers of the given staging buffer, created the first time that buffer
+     * turns up in the rotation. JavaCPP's {@code Pointer} has no address setter, so re-pointing one
+     * wrapper is not an option - but three wrappers cover the three rotating buffers, and after that no
+     * frame allocates anything but the extra buffer reference of its conversion.
      */
-    private BytePointer rgbaTargetPointer(ByteBuffer target) {
+    private int rgbaTargetSlot(ByteBuffer target) {
         long address = MemoryUtil.memAddress(target);
         for (int i = 0; i < this.rgbaTargetAddresses.length; i++) {
             if (this.rgbaTargetAddresses[i] == address) {
-                return this.rgbaTargets[i];
+                return i;
             }
         }
         int slot = this.rgbaTargetSlot;
         this.rgbaTargetSlot = (slot + 1) % this.rgbaTargets.length;
+        releaseTargetRef(slot);
         this.rgbaTargetAddresses[slot] = address;
         BytePointer pointer = new BytePointer(target);
         this.rgbaTargets[slot] = pointer;
-        return pointer;
+        this.rgbaTargetRefs[slot] = avutil.av_buffer_create(pointer, target.capacity(), KEEP_BUFFER, null, 0);
+        return slot;
+    }
+
+    private void releaseTargetRef(int slot) {
+        AVBufferRef ref = this.rgbaTargetRefs[slot];
+        if (ref != null) {
+            avutil.av_buffer_unref(ref);
+            this.rgbaTargetRefs[slot] = null;
+        }
     }
 
     /** Builds (or rebuilds) the YUV(A)/NV12 -> RGBA conversion for a new frame size/format. */
     private void recreateScaler(int format, int srcWidth, int srcHeight, int dstWidth, int dstHeight) {
         releaseScaler();
-        // Bilinear is exact for the 1:1 case (no scaling), so one flag covers both paths.
-        this.swsContext = swscale.sws_getContext(srcWidth, srcHeight, format, dstWidth, dstHeight,
-                avutil.AV_PIX_FMT_RGBA, swscale.SWS_BILINEAR, null, null, (DoublePointer) null);
-        if (this.swsContext == null) {
+        // Set up field by field (what sws_getContext does) to add the slice threads.
+        SwsContext context = swscale.sws_alloc_context();
+        if (context == null) {
             LOGGER.warn("Could not create a scaler for {} (format {})", this.file, format);
             return;
         }
+        context.src_w(srcWidth);
+        context.src_h(srcHeight);
+        context.src_format(format);
+        context.dst_w(dstWidth);
+        context.dst_h(dstHeight);
+        context.dst_format(avutil.AV_PIX_FMT_RGBA);
+        // Bilinear is exact for the 1:1 case (no scaling), so one flag covers both paths.
+        context.flags(swscale.SWS_BILINEAR);
+        context.threads(SCALER_THREADS);
+        int ret = swscale.sws_init_context(context, null, null);
+        if (ret < 0) {
+            swscale.sws_freeContext(context);
+            LOGGER.warn("Could not create a scaler for {} (format {}): {}", this.file, format, errorString(ret));
+            return;
+        }
+        this.swsContext = context;
         this.swsFormat = format;
         this.swsWidth = srcWidth;
         this.swsHeight = srcHeight;
         this.swsOutWidth = dstWidth;
         this.swsOutHeight = dstHeight;
-        // The destination frame is a pointer carrier: av_image_fill_arrays re-points its data at
-        // the sink's staging buffer (see presentFrame - once per size, re-pointed per frame).
+        // The destination frame only carries the staging buffer (see presentFrame).
         this.rgbaFrame = avutil.av_frame_alloc();
-        this.rgbaFrameNeedsFill = true;
         if (this.debug) {
-            LOGGER.info("Scaling {}x{} (format {}) to {}x{} RGBA for {}",
-                    srcWidth, srcHeight, format, dstWidth, dstHeight, this.file);
+            LOGGER.info("Scaling {}x{} (format {}) to {}x{} RGBA on {} threads for {}",
+                    srcWidth, srcHeight, format, dstWidth, dstHeight, SCALER_THREADS, this.file);
         }
     }
 
@@ -1059,7 +1183,9 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         this.rgbaTargets[0] = null;
         this.rgbaTargets[1] = null;
         this.rgbaTargets[2] = null;
-        this.rgbaFrameNeedsFill = true;
+        releaseTargetRef(0);
+        releaseTargetRef(1);
+        releaseTargetRef(2);
         this.swsFormat = -1;
         this.swsWidth = -1;
         this.swsHeight = -1;
