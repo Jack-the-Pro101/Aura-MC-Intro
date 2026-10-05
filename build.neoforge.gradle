@@ -1,0 +1,8 @@
+// NeoForge nodes, every Minecraft version (ModDevGradle). NeoForge runs on Mojang's names in
+// all of them, so nothing is remapped.
+plugins {
+    id 'net.neoforged.moddev' version '2.0.148'
+}
+
+apply from: rootProject.file('gradle/common.gradle')
+apply from: rootProject.file('gradle/neoforge.gradle')

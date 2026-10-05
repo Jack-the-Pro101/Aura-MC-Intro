@@ -1,6 +1,6 @@
 package net.bluegaria.auraintro.client.video;
 
-import net.fabricmc.loader.api.FabricLoader;
+import net.bluegaria.auraintro.client.compat.Platform;
 import org.bytedeco.ffmpeg.global.avcodec;
 import org.bytedeco.ffmpeg.global.avformat;
 import org.bytedeco.ffmpeg.global.avutil;
@@ -61,7 +61,7 @@ public final class FfmpegNativeLibrary {
             }
             checked = true;
             if (System.getProperty("org.bytedeco.javacpp.cachedir") == null) {
-                Path cache = FabricLoader.getInstance().getConfigDir()
+                Path cache = Platform.configDir()
                         .resolve("aura-intro").resolve("javacpp-cache");
                 System.setProperty("org.bytedeco.javacpp.cachedir", cache.toAbsolutePath().toString());
             }

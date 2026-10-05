@@ -5,6 +5,10 @@ pluginManagement {
             url = 'https://maven.fabricmc.net/'
         }
         maven {
+            name = 'NeoForged'
+            url = 'https://maven.neoforged.net/releases'
+        }
+        maven {
             name = 'Kikugie'
             url = 'https://maven.kikugie.dev/releases'
         }
@@ -16,17 +20,40 @@ plugins {
     id 'dev.kikugie.stonecutter' version '0.9.8'
 }
 
-// Multi-version setup: one shared source tree in src/, built once per Minecraft
-// version registered below. The shared build.gradle acts as the version template.
+// Multi-version, multi-loader setup: one shared source tree in src/, built once per
+// (Minecraft version, loader) node. A node is named "<mc>-<loader>" and lives in
+// versions/<node>/; its Minecraft-specific values come from gradle/mc/<mc>.properties.
+//
+// Each Minecraft version listed here is the one a node compiles against; the range of
+// versions its jar accepts (e.g. 1.21.6-1.21.8 for the 1.21.8 node) is declared in that
+// properties file.
+def minecraftVersions = [
+        '1.21.1', '1.21.3', '1.21.4', '1.21.5', '1.21.8', '1.21.10', '1.21.11',
+        '26.1', '26.2', '26.3'
+]
+def loaders = ['fabric', 'neoforge']
+
 stonecutter {
     // Use the Groovy DSL (stonecutter defaults to Kotlin)
     kotlinController = false
     centralScript = 'build.gradle'
 
     create(getRootProject()) {
-        // 1.21.x ships obfuscated jars -> loom's remapping variant
-        versions('1.21.10', '1.21.11').buildscript('build.remap.gradle')
-        // 26.x ships unobfuscated jars -> loom's non-obfuscated variant
-        versions('26.1', '26.2', '26.3').buildscript('build.gradle')
+        minecraftVersions.each { mc ->
+            loaders.each { loader ->
+                def script
+                if (loader == 'neoforge') {
+                    // NeoForge runs on Mojang's names in every supported version: no remapping.
+                    script = 'build.neoforge.gradle'
+                } else if (mc.startsWith('1.')) {
+                    // 1.21.x ships obfuscated jars -> loom's remapping variant
+                    script = 'build.remap.gradle'
+                } else {
+                    // 26.x ships unobfuscated jars -> loom's non-obfuscated variant
+                    script = 'build.gradle'
+                }
+                version("${mc}-${loader}", mc).buildscript(script)
+            }
+        }
     }
 }

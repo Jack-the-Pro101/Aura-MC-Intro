@@ -119,15 +119,17 @@ public abstract class TitleScreenMixin implements ScaledTitleScreen {
         AuraIntroVideoManager.get().drawTitleScreenVideo(graphics);
     }
 
+    //? if >=1.21.6 {
     /**
      * The version/mod-count line at the bottom left is drawn with a colour that has vanilla's own
      * screen fade as its alpha. Scaling that alpha is what makes it start transparent and fade in on
      * the configured timetable like the buttons - by the time the video hands the screen over,
-     * vanilla's fade is already finished, so it was always fully visible.
+     * vanilla's fade is already finished, so it was always fully visible. (NeoForge draws its branding
+     * lines in the same colour.)
      */
     @ModifyExpressionValue(
             method = "extractRenderState",
-            //? if 1.21.10 {
+            //? if <1.21.11 || neoforge {
             /*at = @At(value = "INVOKE", target = "Lnet/minecraft/util/ARGB;color(FI)I"))
             *///?} else {
             at = @At(value = "INVOKE", target = "Lnet/minecraft/util/ARGB;white(F)I"))
@@ -135,11 +137,49 @@ public abstract class TitleScreenMixin implements ScaledTitleScreen {
     private int auraintro$fadeVersionText(int original) {
         return AuraIntroVideoManager.get().scaleTitleTextAlpha(original);
     }
+    //?}
+
+    /*
+     * The version/mod-count line before 1.21.6: its colour is 0xFFFFFF | alpha, built inline, so the draw call
+     * itself is wrapped. NeoForge draws its branding lines (the version line among them) in lambdas of
+     * render, hence a NeoForge target of its own. A text colour with an alpha below 4 is drawn fully opaque by
+     * these versions' font renderer, so a faded-out line is skipped altogether.
+     */
+    //? if <1.21.6 && fabric {
+    /*@WrapOperation(
+            method = "extractRenderState",
+            at = @At(value = "INVOKE",
+                    target = "Lnet/minecraft/client/gui/GuiGraphicsExtractor;drawString(Lnet/minecraft/client/gui/Font;Ljava/lang/String;III)I"))
+    private int auraintro$fadeVersionText(GuiGraphicsExtractor graphics, Font font, String text, int x, int y,
+                                            int color, Operation<Integer> original) {
+        int scaled = AuraIntroVideoManager.get().scaleTitleTextAlpha(color);
+        if ((scaled >>> 24) < 4) {
+            return x;
+        }
+        return original.call(graphics, font, text, x, y, scaled);
+    }
+    *///?}
+
+    //? if <1.21.6 && neoforge {
+    /*@WrapOperation(
+            method = "/lambda\\$render\\$\\d+/",
+            at = @At(value = "INVOKE",
+                    target = "Lnet/minecraft/client/gui/GuiGraphicsExtractor;drawString(Lnet/minecraft/client/gui/Font;Ljava/lang/String;III)I"))
+    private int auraintro$fadeVersionText(GuiGraphicsExtractor graphics, Font font, String text, int x, int y,
+                                            int color, Operation<Integer> original) {
+        int scaled = AuraIntroVideoManager.get().scaleTitleTextAlpha(color);
+        if ((scaled >>> 24) < 4) {
+            return x;
+        }
+        return original.call(graphics, font, text, x, y, scaled);
+    }
+    *///?}
 
     /**
      * The splash text is drawn with vanilla's fade as its alpha, so it can be scaled the same way - and
      * skipped entirely when the mod is asked to hide it.
      */
+    //? if >=1.21.6 {
     @WrapOperation(
             method = "extractRenderState",
             at = @At(value = "INVOKE",
@@ -155,4 +195,24 @@ public abstract class TitleScreenMixin implements ScaledTitleScreen {
         }
         original.call(splash, graphics, width, font, scaled);
     }
+    //?} else {
+    /*// Before 1.21.6 the splash takes its alpha as the top byte of a colour.
+    @WrapOperation(
+            method = "extractRenderState",
+            at = @At(value = "INVOKE",
+                    target = "Lnet/minecraft/client/gui/components/SplashRenderer;extractRenderState(Lnet/minecraft/client/gui/GuiGraphicsExtractor;ILnet/minecraft/client/gui/Font;I)V"))
+    private void auraintro$fadeSplashText(SplashRenderer splash, GuiGraphicsExtractor graphics, int width,
+                                            Font font, int alphaBits, Operation<Void> original) {
+        if (AuraIntroVideoManager.get().shouldHideSplashText()) {
+            return;
+        }
+        float scaled = AuraIntroVideoManager.get().scaleSplashAlpha((alphaBits >>> 24) / 255.0F);
+        int scaledBits = Math.round(scaled * 255.0F);
+        // The font renderer draws an alpha below 4 fully opaque.
+        if (scaledBits < 4) {
+            return;
+        }
+        original.call(splash, graphics, width, font, scaledBits << 24);
+    }
+    *///?}
 }

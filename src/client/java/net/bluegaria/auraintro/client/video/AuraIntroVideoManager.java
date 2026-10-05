@@ -14,10 +14,8 @@ import net.minecraft.client.gui.screens.Overlay;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.server.packs.resources.ReloadInstance;
-import net.minecraft.util.ARGB;
 import net.minecraft.util.Mth;
 import net.minecraft.util.Util;
-import org.joml.Matrix3x2fStack;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -1619,8 +1617,8 @@ public final class AuraIntroVideoManager {
         if (factor < 0.0F) {
             return colour;
         }
-        return ARGB.color(Math.round(ARGB.alpha(colour) * factor),
-                ARGB.red(colour), ARGB.green(colour), ARGB.blue(colour));
+        int alpha = Math.round((colour >>> 24) * factor);
+        return (Math.max(0, Math.min(255, alpha)) << 24) | (colour & 0x00FFFFFF);
     }
 
     /**
@@ -1835,9 +1833,7 @@ public final class AuraIntroVideoManager {
             draw.draw(mouseX, mouseY);
             return;
         }
-        Matrix3x2fStack pose = graphics.pose();
-        pose.pushMatrix();
-        pose.scale(factor, factor);
+        McCompat.pushScale(graphics, factor);
         this.titlePassFactor = factor;
         this.titlePassWidth = screen.width;
         this.titlePassHeight = screen.height;
@@ -1845,7 +1841,7 @@ public final class AuraIntroVideoManager {
             draw.draw((int) Math.floor(mouseX / factor), (int) Math.floor(mouseY / factor));
         } finally {
             this.titlePassFactor = -1.0F;
-            pose.popMatrix();
+            McCompat.popScale(graphics);
         }
     }
 
@@ -1897,15 +1893,13 @@ public final class AuraIntroVideoManager {
         }
         // The title screen is drawn at its own GUI scale, but the video covers the window: undo the
         // screen's scale and report the window's real size while it is drawn.
-        Matrix3x2fStack pose = graphics.pose();
-        pose.pushMatrix();
-        pose.scale(1.0F / factor, 1.0F / factor);
+        McCompat.pushScale(graphics, 1.0F / factor);
         this.titlePassFactor = -1.0F;
         try {
             drawTitleScreenVideoNow(graphics);
         } finally {
             this.titlePassFactor = factor;
-            pose.popMatrix();
+            McCompat.popScale(graphics);
         }
     }
 

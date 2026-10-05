@@ -38,11 +38,24 @@ Everything works out of the box, and everything can be tuned in-game.
 
 ## Requirements
 
-| Required                                                   | Optional                                                       |
-| ---------------------------------------------------------- | -------------------------------------------------------------- |
-| Minecraft **1.21.10, 1.21.11, 26.1, 26.2 or 26.3**         | [Mod Menu](https://modrinth.com/mod/modmenu), to open the config screen |
-| [Fabric Loader](https://fabricmc.net) ≥ 0.19.5 + [Fabric API](https://modrinth.com/mod/fabric-api) |                                                                |
-| [Cloth Config](https://modrinth.com/mod/cloth-config)      |                                                                |
+Aura-Intro runs on **Fabric** and **NeoForge**, Minecraft **1.21 through 26.3**. Download the file for your
+Minecraft version and loader; each covers a range:
+
+| File for | Works on                                                                                   |
+| -------- | ------------------------------------------------------------------------------------------ |
+| 1.21.1   | 1.21, 1.21.1                                                                               |
+| 1.21.3   | 1.21.2, 1.21.3                                                                             |
+| 1.21.4   | 1.21.4                                                                                     |
+| 1.21.5   | 1.21.5                                                                                     |
+| 1.21.8   | 1.21.6, 1.21.7, 1.21.8                                                                     |
+| 1.21.10  | 1.21.9, 1.21.10                                                                            |
+| 1.21.11  | 1.21.11                                                                                    |
+| 26.x     | 26.1, 26.2, 26.3 (one file each)                                                           |
+
+| Loader   | Required                                                                                   | Optional                                       |
+| -------- | ------------------------------------------------------------------------------------------ | ---------------------------------------------- |
+| Fabric   | [Fabric API](https://modrinth.com/mod/fabric-api), [Cloth Config](https://modrinth.com/mod/cloth-config) | [Mod Menu](https://modrinth.com/mod/modmenu), to open the config screen |
+| NeoForge | [Cloth Config](https://modrinth.com/mod/cloth-config)                                      | (the config screen is in NeoForge's mod list)  |
 
 **No FFmpeg or VLC install needed.** The video decoder ships inside the mod for Windows, Linux and macOS
 (x86-64 and ARM64). It also works in sandboxed launchers such as the Prism Launcher Flatpak.
@@ -55,7 +68,8 @@ Everything works out of the box, and everything can be tuned in-game.
           -row-mt 1 -c:a libopus -b:a 128k intro.webm
    ```
 2. Save it as **`config/aura-intro/intro.webm`** in your game folder.
-3. Open **Mod Menu → Aura-Intro → Config** and set **Freeze frame at (ms)** to the moment where the loading screen
+3. Open the config screen (**Mod Menu → Aura-Intro → Config** on Fabric, **Mods → Aura-Intro → Config** on
+   NeoForge) and set **Freeze frame at (ms)** to the moment where the loading screen
    should freeze, for example the end of a logo animation.
 4. Adjust the fade timings to match your video. All intro timings are measured from the first frame shown on
    the title screen.
@@ -65,7 +79,7 @@ smoothly almost everywhere, while 4K can be heavy for laptops, especially during
 
 ## Configuration
 
-All options are available in-game (Mod Menu → Config) and in `config/aura-intro.json`. The ones you will
+All options are available in-game (the mod's **Config** button) and in `config/aura-intro.json`. The ones you will
 most likely touch:
 
 | Option                              | What it does                                                                 |

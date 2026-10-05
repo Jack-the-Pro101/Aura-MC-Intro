@@ -28,7 +28,14 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(Screen.class)
 public abstract class ScreenMixin {
 
-    @WrapMethod(method = "extractRenderStateWithTooltipAndSubtitles")
+    @WrapMethod(
+            //? if >=26.1 {
+            method = "extractRenderStateWithTooltipAndSubtitles")
+            //?} else if >=1.21.9 {
+            /*method = "renderWithTooltipAndSubtitles")
+            *///?} else {
+            /*method = "renderWithTooltip")
+            *///?}
     private void auraintro$scaledTitleScreen(GuiGraphicsExtractor graphics, int mouseX, int mouseY,
                                                float partialTick, Operation<Void> original) {
         Screen screen = (Screen) (Object) this;
@@ -40,13 +47,23 @@ public abstract class ScreenMixin {
                 (x, y) -> original.call(graphics, x, y, partialTick));
     }
 
+    //? if >=26.1 {
     @Inject(method = "extractPanorama", at = @At("TAIL"))
+    //?} else {
+    /*@Inject(method = "renderPanorama", at = @At("TAIL"))
+    *///?}
     private void auraintro$loopBehindMenus(GuiGraphicsExtractor graphics, float partialTick, CallbackInfo ci) {
         // The title screen draws its own video (TitleScreenMixin); this is for the other menus.
         if (!((Object) this instanceof TitleScreen) && AuraIntroVideoManager.get().drawMenuBackgroundVideo(graphics)) {
+            //? if >=1.21.6 {
             // Vanilla blurs everything before the stratum it blurs in, and that is the one the panorama
             // was drawn in: a stratum of its own puts the video under the blur too.
             graphics.nextStratum();
+            //?} else {
+            /*// The blur is a post-process of whatever reached the framebuffer: the video has to be drawn
+            // by then, not still be waiting in the GUI's batch.
+            graphics.flush();
+            *///?}
         }
     }
 }

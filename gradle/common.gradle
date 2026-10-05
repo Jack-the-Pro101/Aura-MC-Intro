@@ -1,31 +1,31 @@
-// Common node configuration, shared by all Minecraft versions. Applied from the
-// per-node build scripts (build.gradle for 26.x, build.remap.gradle for 1.21.x),
-// which differ only in the loom plugin variant and the dependency configurations.
+// Common node configuration, shared by every (Minecraft version, loader) node. Applied
+// from the per-node build scripts after their plugins:
+//   build.gradle          - Fabric, 26.x (loom, non-obfuscated)      + gradle/fabric.gradle
+//   build.remap.gradle    - Fabric, 1.21.x (loom, remapping)          + gradle/fabric.gradle
+//   build.neoforge.gradle - NeoForge, every version (ModDevGradle)   + gradle/neoforge.gradle
 //
-// This script runs once for every supported Minecraft version (see settings.gradle).
-// Version-specific values live in versions/<mc>/gradle.properties, shared values in
-// the root gradle.properties. sc.current.version is the current node's MC version.
+// Nodes are named "<mc>-<loader>" (see settings.gradle). Minecraft-specific values live in
+// gradle/mc/<mc>.properties, shared values in the root gradle.properties.
 
-// Mod version is suffixed with the Minecraft version, e.g. Aura-Intro-1.0-SNAPSHOT+26.2.jar
-version = "${project.mod_version}+${sc.current.version}"
+def mcProperties = new Properties()
+rootProject.file("gradle/mc/${sc.current.version}.properties").withInputStream { mcProperties.load(it) }
+mcProperties.each { key, value -> project.ext.set(key as String, value) }
+
+def loader = sc.current.project.tokenize('-')[-1]
+project.ext.loader = loader
+
+// e.g. Aura-Intro-1.0-SNAPSHOT+1.21.1-neoforge.jar
+version = "${project.mod_version}+${sc.current.version}-${loader}"
 group = project.maven_group
 
 base {
     archivesName = project.archives_base_name
 }
 
-loom {
-    splitEnvironmentSourceSets()
-
-    mods {
-        "aura-intro" {
-            sourceSet sourceSets.main
-            sourceSet sourceSets.client
-        }
-    }
-}
-
 stonecutter {
+    // `//? if fabric {` / `//? if neoforge {` select the loader-specific code.
+    constants.match(loader, 'fabric', 'neoforge')
+
     // The shared source is written against the 26.x API; 1.21.x builds get the 1.21
     // names swapped in. The replacements are direction-based and reversible: on 26.x
     // nodes the reverse rewrite is a no-op, because text already in the "output" form
@@ -43,8 +43,8 @@ stonecutter {
         replace '"extractRenderState(Lnet/minecraft/client/gui/GuiGraphicsExtractor;IF)V"',
                 '"renderLogo(Lnet/minecraft/client/gui/GuiGraphics;IF)V"'
     }
-    replacements.string(sc.current.parsed.matches('1.21.10')) {
-        // ResourceLocation was still called that in 1.21.10, and Util lives one package up
+    replacements.string(sc.current.parsed.matches('<1.21.11')) {
+        // ResourceLocation was still called that up to 1.21.10, and Util lives one package up
         replace 'Identifier', 'ResourceLocation'
         replace 'import net.minecraft.util.Util;', 'import net.minecraft.Util;'
     }
@@ -57,18 +57,18 @@ stonecutter {
     }
 }
 
-fabricApi {
-    configureDataGeneration {
-        client = true
-    }
-}
-
 repositories {
-    // Modrinth maven - used for Mod Menu, Placeholder API and Cloth Config
-    maven {
-        name = 'Modrinth'
-        url = 'https://api.modrinth.com/maven'
-        content {
+    // Modrinth maven - used for Mod Menu, Placeholder API and Cloth Config. Exclusive: no other
+    // repository is ever asked for these, so an outage elsewhere (a 502 from a loader's maven used
+    // to disable that whole repository for the build) cannot break their resolution, and vice versa.
+    exclusiveContent {
+        forRepository {
+            maven {
+                name = 'Modrinth'
+                url = 'https://api.modrinth.com/maven'
+            }
+        }
+        filter {
             includeGroup "maven.modrinth"
         }
     }
@@ -76,6 +76,7 @@ repositories {
 
 // The FFmpeg platforms bundled with the mod (prebuilt libraries from the JavaCPP presets).
 def ffmpegPlatforms = ['windows-x86_64', 'linux-x86_64', 'linux-arm64', 'macosx-x86_64', 'macosx-arm64']
+project.ext.ffmpegPlatforms = ffmpegPlatforms
 
 // Folder with the committed minimal FFmpeg libraries (see gradle.properties): the artifact zips
 // (GitHub packs them around the loose libraries the ffmpeg.yml workflow uploads), downloaded from
@@ -85,13 +86,28 @@ def ffmpegLibsDir = (project.findProperty('ffmpeg_libraries') ?: '') as String
 
 // The player only uses avutil/avcodec/avformat/swresample/swscale - avdevice, avfilter and the
 // ffmpeg/ffprobe command line programs (roughly 40% of every natives jar) are dead weight for
-// VP9-in-WebM playback. Loom's jar-in-jar mechanism requires module components, so each trimmed
-// jar is written into a build-local Maven repository (as net.bluegaria.ffmpeg:ffmpeg-natives)
-// and nested from there like any regular dependency.
+// VP9-in-WebM playback. Jar-in-jar (loom's and NeoForge's alike) requires module components, so each
+// trimmed jar is written into a build-local Maven repository (as
+// net.bluegaria.ffmpeg:ffmpeg-natives-<platform>) and nested from there like any regular dependency.
+// One artifact per platform rather than one artifact with five classifiers: NeoForge's jar-in-jar
+// tells nested jars apart by group and artifact only, and would keep just one platform.
 def ffmpegMaven = project.layout.buildDirectory.dir('ffmpeg-maven')
 
 if (project.bundle_video_libraries.toBoolean()) {
     ffmpegPlatforms.each { platform ->
+        // NeoForge's jarJar resolves the nested jars while the task graph is built - before the trim task
+        // below ran. A placeholder lets that resolution succeed; the task replaces it before jarJar reads it.
+        def placeholder = ffmpegMaven.get()
+                .file("net/bluegaria/ffmpeg/ffmpeg-natives-${platform}/${project.ffmpeg_version}/ffmpeg-natives-${platform}-${project.ffmpeg_version}.jar")
+                .asFile
+        if (!placeholder.exists()) {
+            placeholder.parentFile.mkdirs()
+            new java.util.zip.ZipOutputStream(new java.io.FileOutputStream(placeholder)).withCloseable { zip ->
+                zip.putNextEntry(new java.util.zip.ZipEntry('META-INF/MANIFEST.MF'))
+                zip.write('Manifest-Version: 1.0\n'.bytes)
+                zip.closeEntry()
+            }
+        }
         def trimTask = tasks.register("trimFfmpegNatives${platform.replaceAll(/[^a-zA-Z0-9]/, '_')}") {
             description = "Trims the bundled FFmpeg natives (${platform}) to the libraries the player loads."
             def source = configurations.detachedConfiguration(
@@ -100,10 +116,11 @@ if (project.bundle_video_libraries.toBoolean()) {
                     })
             def outFile = ffmpegMaven
                     // Maven repository layout: group (net.bluegaria.ffmpeg) with dots as slashes.
-                    .map { it.dir("net/bluegaria/ffmpeg/ffmpeg-natives/${project.ffmpeg_version}") }
-                    .map { it.file("ffmpeg-natives-${project.ffmpeg_version}-${platform}.jar") }
+                    .map { it.dir("net/bluegaria/ffmpeg/ffmpeg-natives-${platform}/${project.ffmpeg_version}") }
+                    .map { it.file("ffmpeg-natives-${platform}-${project.ffmpeg_version}.jar") }
             inputs.property('platform', platform)
             inputs.files(source)
+
 
             // The custom minimal libraries replace bytedeco's by name (same FFmpeg release, so
             // the JNI wrappers bind unchanged): either <platform>.zip / ffmpeg-*-min-<platform>.zip
@@ -165,7 +182,15 @@ if (project.bundle_video_libraries.toBoolean()) {
                                 return
                             }
                             out.putNextEntry(new java.util.zip.ZipEntry(entry.name))
-                            if (customLibs.containsKey(name)) {
+                            if (entry.name == 'META-INF/MANIFEST.MF') {
+                                // NeoForge loads nested jars as Java modules, and no valid module
+                                // name can be derived from "...-x86_64" (a segment may not start
+                                // with a digit): name it explicitly.
+                                def manifest = new java.util.jar.Manifest(zip.getInputStream(entry))
+                                manifest.mainAttributes.putValue('Automatic-Module-Name',
+                                        "net.bluegaria.ffmpeg.natives.${platform.replace('-', '_')}")
+                                manifest.write(out)
+                            } else if (customLibs.containsKey(name)) {
                                 // Custom minimal build replaces the bytedeco library by name.
                                 out.write(customLibs[name])
                                 replaced << name
@@ -190,68 +215,29 @@ if (project.bundle_video_libraries.toBoolean()) {
     }
 
     repositories {
-        maven {
-            name = 'FfmpegNatives'
-            url = ffmpegMaven
-            // The repository only holds the trimmed jars, no POMs.
-            metadataSources { artifact() }
-            content {
+        exclusiveContent {
+            forRepository {
+                maven {
+                    name = 'FfmpegNatives'
+                    url = ffmpegMaven
+                    // The repository only holds the trimmed jars, no POMs.
+                    metadataSources { artifact() }
+                }
+            }
+            filter {
                 includeGroup 'net.bluegaria.ffmpeg'
             }
         }
-    }
-
-    // The nested jars are resolved when loom processes the mod jar - by then the trimmed
-    // jars must exist.
-    tasks.matching { it.name == 'processIncludeJars' }.configureEach {
-        dependsOn tasks.matching { it.name.startsWith('trimFfmpegNatives') }
     }
 }
 
 
 dependencies {
-    // To change the versions see the versions/<mc>/gradle.properties file
-    minecraft "com.mojang:minecraft:${sc.current.version}"
-
-    // 1.21.x ships obfuscated jars (remapping loom variant), 26.x does not.
-    if (sc.current.parsed.matches('<26.1')) {
-        // Obfuscated environment (1.21.x): dependencies must be remapped to the
-        // compile mappings, and the built jar is remapped to intermediary names.
-        mappings loom.officialMojangMappings()
-        modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
-        modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
-
-        // Cloth Config - in-game config screen (external dependency, deliberately NOT bundled:
-        // users install it themselves - compile-time and dev-runtime only)
-        modImplementation "maven.modrinth:cloth-config:${project.cloth_config_version}"
-
-        // Mod Menu - optional integration, deliberately NOT bundled
-        modImplementation "maven.modrinth:modmenu:${project.modmenu_version}"
-        // Mod Menu requires Placeholder API at runtime; only needed for the dev environment
-        modRuntimeOnly "maven.modrinth:placeholder-api:${project.placeholder_api_version}"
-    } else {
-        // Non-obfuscated environment (26.x): no remapping configurations exist,
-        // mods are consumed on the plain configurations.
-        implementation "net.fabricmc:fabric-loader:${project.loader_version}"
-        implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
-
-        // Cloth Config - in-game config screen (external dependency, deliberately NOT bundled:
-        // users install it themselves - compile-time and dev-runtime only)
-        implementation "maven.modrinth:cloth-config:${project.cloth_config_version}"
-
-        // Mod Menu - optional integration, deliberately NOT bundled
-        implementation "maven.modrinth:modmenu:${project.modmenu_version}"
-        // Mod Menu requires Placeholder API at runtime; only needed for the dev environment
-        runtimeOnly "maven.modrinth:placeholder-api:${project.placeholder_api_version}"
-    }
-
-    // MixinExtras is shipped by the loader at runtime; this is only for compile-time annotations.
-    compileOnly "io.github.llamalad7:mixinextras-fabric:0.5.5"
-
     // Video playback: FFmpeg is bundled with the mod (JavaCPP presets), so nothing has to be
     // installed on the system. libavformat demuxes the WebM container, libavcodec decodes
     // (VP9 video, Opus audio), libswscale converts pictures to RGBA and libswresample
-    // resamples the sound for audio output.
+    // resamples the sound for audio output. Nesting them into the jar is loader-specific
+    // (gradle/fabric.gradle, gradle/neoforge.gradle).
     implementation "org.bytedeco:javacpp:${project.javacpp_version}"
     implementation "org.bytedeco:ffmpeg:${project.ffmpeg_version}"
     // In the dev environment the natives for the running platform come from these jars as well;
@@ -259,39 +245,43 @@ dependencies {
     ffmpegPlatforms.each { platform ->
         implementation "org.bytedeco:ffmpeg:${project.ffmpeg_version}:${platform}"
     }
-
-    if (project.bundle_video_libraries.toBoolean()) {
-        // The Java binding layer (javacpp) plus the FFmpeg API classes.
-        include "org.bytedeco:javacpp:${project.javacpp_version}"
-        include "org.bytedeco:ffmpeg:${project.ffmpeg_version}"
-        // JNA remains for the libc setenv() call in AuraIntroClient (OpenAL inside sandboxes).
-        include "net.java.dev.jna:jna:${project.jna_version}"
-        // The prebuilt libraries, trimmed (see the trimFfmpegNatives tasks above) and nested
-        // from the build-local repository.
-        ffmpegPlatforms.each { platform ->
-            include "net.bluegaria.ffmpeg:ffmpeg-natives:${project.ffmpeg_version}:${platform}"
-        }
-    }
 }
 
-// Both resource tasks (main and client source sets) fill in the version placeholders
-// for fabric.mod.json and the mixin config.
+// The mixins that only exist in some versions, registered by aura-intro.versioned.mixins.json.
+def versionedMixins = []
+if (sc.current.parsed.matches('>=26.1')) {
+    versionedMixins << 'GuiGraphicsExtractorInvoker'
+} else {
+    versionedMixins << 'GuiGraphicsInvoker'
+}
+
+// Fills in the version placeholders of the mod metadata and the mixin configs.
 def expandProps = [
-        "version"                : project.version.toString(),
-        "minecraft_version"      : sc.current.version,
-        "loader_version"         : project.loader_version.toString(),
-        "minecraft_dependency"   : project.minecraft_dependency.toString(),
-        "cloth_config_dependency": project.cloth_config_dependency.toString(),
-        "modmenu_dependency"     : project.modmenu_dependency.toString(),
-        "mixin_compat"           : project.mixin_compat.toString(),
-        "versioned_mixins"       : project.versioned_mixins.toString()
+        "version"                    : project.version.toString(),
+        "minecraft_version"          : sc.current.version,
+        "loader_version"             : project.loader_version.toString(),
+        "fabric_minecraft_dependency": project.fabric_minecraft_dependency.toString(),
+        "neoforge_minecraft_range"   : project.neoforge_minecraft_range.toString(),
+        "neoforge_range"             : project.neoforge_range.toString(),
+        "cloth_config_min"           : project.cloth_config_min.toString(),
+        "modmenu_min"                : project.modmenu_min.toString(),
+        "mixin_compat"               : project.mixin_compat.toString(),
+        "versioned_mixins"           : versionedMixins.collect { "\"${it}\"" }.join(', ')
 ]
 
 tasks.withType(ProcessResources).configureEach {
     inputs.properties(expandProps)
     filteringCharset "UTF-8"
 
-    filesMatching(["fabric.mod.json", "aura-intro.client.mixins.json", "aura-intro.versioned.mixins.json"]) {
+    // Each loader only gets its own mod metadata.
+    if (loader == 'fabric') {
+        exclude 'META-INF/neoforge.mods.toml'
+    } else {
+        exclude 'fabric.mod.json'
+    }
+
+    filesMatching(["fabric.mod.json", "META-INF/neoforge.mods.toml",
+                   "aura-intro.client.mixins.json", "aura-intro.versioned.mixins.json"]) {
         expand expandProps
     }
 }
@@ -299,13 +289,8 @@ tasks.withType(ProcessResources).configureEach {
 def targetJavaVersion = (project.java_target as String).toInteger()
 tasks.withType(JavaCompile).configureEach {
     // ensure that the encoding is set to UTF-8, no matter what the system default is
-    // this fixes some edge cases with special characters not displaying correctly
-    // see http://yodaconditions.net/blog/fix-for-java-file-encoding-problems-with-gradle.html
-    // If Javadoc is generated, this must be specified in that task too.
     it.options.encoding = "UTF-8"
-    if (targetJavaVersion >= 10 || JavaVersion.current().isJava10Compatible()) {
-        it.options.release.set(targetJavaVersion)
-    }
+    it.options.release.set(targetJavaVersion)
 }
 
 java {
@@ -313,32 +298,11 @@ java {
     if (JavaVersion.current() < javaVersion) {
         toolchain.languageVersion = JavaLanguageVersion.of(targetJavaVersion)
     }
-    // Loom will automatically attach sourcesJar to a RemapSourcesJar task and to the "build" task
-    // if it is present.
-    // If you remove this line, sources will not be generated.
     withSourcesJar()
 }
 
 jar {
     from(rootProject.file("LICENSE.txt")) {
         rename { "LICENSE_${project.archives_base_name}.txt" }
-    }
-}
-
-// configure the maven publication
-publishing {
-    publications {
-        create("mavenJava", MavenPublication) {
-            artifactId = project.archives_base_name
-            from components.java
-        }
-    }
-
-    // See https://docs.gradle.org/current/userguide/publishing_maven.html for information on how to set up publishing.
-    repositories {
-        // Add repositories to publish to here.
-        // Notice: This block does NOT have the same function as the block in the top level.
-        // The repositories here will be used for publishing your artifact, not for
-        // retrieving dependencies.
     }
 }

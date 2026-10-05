@@ -1,0 +1,77 @@
+// NeoForge node configuration (ModDevGradle). Applied after gradle/common.gradle by
+// build.neoforge.gradle.
+//
+// The sources keep loom's layout: src/main holds the resources, src/client the client code.
+// Both source sets make up the one mod, exactly like loom's split environment source sets.
+
+sourceSets {
+    client {
+        compileClasspath += sourceSets.main.output
+        runtimeClasspath += sourceSets.main.output
+    }
+}
+
+configurations {
+    clientImplementation.extendsFrom implementation
+    clientCompileOnly.extendsFrom compileOnly
+    clientRuntimeOnly.extendsFrom runtimeOnly
+}
+
+neoForge {
+    version = project.neoforge_version
+
+    // Minecraft and NeoForge on the client source set's classpath too.
+    addModdingDependenciesTo(sourceSets.client)
+
+    mods {
+        // NeoForge mod ids may not contain a hyphen; the asset namespace stays "aura-intro".
+        auraintro {
+            sourceSet(sourceSets.main)
+            sourceSet(sourceSets.client)
+        }
+    }
+
+    runs {
+        client {
+            client()
+            gameDirectory = project.file('run')
+        }
+    }
+}
+
+dependencies {
+    // Cloth Config - in-game config screen (external dependency, deliberately NOT bundled)
+    implementation "maven.modrinth:cloth-config:${project.cloth_config_version}+neoforge"
+
+    if (sc.current.parsed.matches('<1.21.9')) {
+        // Dev runs only: the FML of NeoForge 21.1-21.8 does not show plain classpath libraries to mods,
+        // they have to be on its "legacy" classpath. (Built jars get them from the jar-in-jar below.)
+        additionalRuntimeClasspath "org.bytedeco:javacpp:${project.javacpp_version}"
+        additionalRuntimeClasspath "org.bytedeco:ffmpeg:${project.ffmpeg_version}"
+        project.ffmpegPlatforms.each { platform ->
+            additionalRuntimeClasspath "org.bytedeco:ffmpeg:${project.ffmpeg_version}:${platform}"
+        }
+    }
+
+    if (project.bundle_video_libraries.toBoolean()) {
+        // FFmpeg, nested the NeoForge way. Minecraft itself ships JNA, so unlike on Fabric it is not
+        // nested here: a second copy would be a second module of the same name.
+        jarJar "org.bytedeco:javacpp:${project.javacpp_version}"
+        jarJar "org.bytedeco:ffmpeg:${project.ffmpeg_version}"
+        project.ffmpegPlatforms.each { platform ->
+            jarJar "net.bluegaria.ffmpeg:ffmpeg-natives-${platform}:${project.ffmpeg_version}"
+        }
+    }
+}
+
+jar {
+    from sourceSets.client.output
+}
+
+sourcesJar {
+    from sourceSets.client.allSource
+}
+
+tasks.matching { it.name == 'jarJar' }.configureEach {
+    dependsOn tasks.matching { it.name.startsWith('trimFfmpegNatives') }
+}

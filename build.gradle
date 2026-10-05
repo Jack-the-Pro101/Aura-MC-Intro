@@ -1,9 +1,8 @@
-// Shared build script for the 26.x nodes (Minecraft's jars are no longer obfuscated
-// since 26.1, so loom runs in its non-obfuscated mode here - no remapping, plain
-// dependency configurations). See gradle/common.gradle for the actual configuration.
+// Fabric nodes for 26.x (Minecraft's jars are no longer obfuscated since 26.1, so loom runs in
+// its non-obfuscated mode here - no remapping, plain dependency configurations).
 plugins {
     id 'net.fabricmc.fabric-loom' version '1.17-SNAPSHOT'
-    id 'maven-publish'
 }
 
 apply from: rootProject.file('gradle/common.gradle')
+apply from: rootProject.file('gradle/fabric.gradle')

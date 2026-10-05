@@ -1,5 +1,6 @@
 package net.bluegaria.auraintro.client;
 
+//? if fabric {
 import net.bluegaria.auraintro.client.video.FfmpegNativeLibrary;
 import net.fabricmc.loader.api.FabricLoader;
 import net.fabricmc.loader.api.entrypoint.PreLaunchEntrypoint;
@@ -50,3 +51,4 @@ public class AuraIntroPreLaunch implements PreLaunchEntrypoint {
         }
     }
 }
+//?}

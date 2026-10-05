@@ -319,9 +319,13 @@ public final class VideoFrameSink {
         try {
             frame.clear();
             if (!VideoTextureUploader.uploadRgba(texture, frame, width, height)) {
+                //? if >=1.21.5 {
                 MemoryUtil.memCopy(MemoryUtil.memAddress(frame), image.getPointer(),
                         (long) width * height * BYTES_PER_PIXEL);
                 texture.upload();
+                //?}
+                // (Before 1.21.5 the upload is plain GL with nothing to fall back to - and no public
+                // pointer to the texture's image to copy into.)
             }
         } finally {
             finishUpload();

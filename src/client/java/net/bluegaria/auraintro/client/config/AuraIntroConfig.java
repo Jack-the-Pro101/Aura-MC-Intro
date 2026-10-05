@@ -4,7 +4,7 @@ import com.google.gson.annotations.SerializedName;
 import me.shedaniel.autoconfig.ConfigData;
 import me.shedaniel.autoconfig.annotation.Config;
 import me.shedaniel.autoconfig.annotation.ConfigEntry;
-import net.fabricmc.loader.api.FabricLoader;
+import net.bluegaria.auraintro.client.compat.Platform;
 
 import java.nio.file.Path;
 
@@ -395,7 +395,7 @@ public class AuraIntroConfig implements ConfigData {
         }
         Path path = Path.of(configured);
         if (!path.isAbsolute()) {
-            path = FabricLoader.getInstance().getGameDir().resolve(path);
+            path = Platform.gameDir().resolve(path);
         }
         return path.normalize();
     }

@@ -35,10 +35,10 @@
   "depends": {
     "fabricloader": ">=${loader_version}",
     "fabric-api": "*",
-    "minecraft": "${minecraft_dependency}",
-    "cloth-config": "${cloth_config_dependency}"
+    "minecraft": "${fabric_minecraft_dependency}",
+    "cloth-config": ">=${cloth_config_min}"
   },
   "suggests": {
-    "modmenu": "${modmenu_dependency}"
+    "modmenu": ">=${modmenu_min}"
   }
 }

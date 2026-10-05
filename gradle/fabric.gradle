@@ -1,0 +1,72 @@
+// Fabric node configuration (loom). Applied after gradle/common.gradle by build.gradle (26.x,
+// non-obfuscated) and build.remap.gradle (1.21.x, remapped to intermediary names).
+
+loom {
+    splitEnvironmentSourceSets()
+
+    mods {
+        "aura-intro" {
+            sourceSet sourceSets.main
+            sourceSet sourceSets.client
+        }
+    }
+}
+
+fabricApi {
+    configureDataGeneration {
+        client = true
+    }
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+
+    // 1.21.x ships obfuscated jars (remapping loom variant), 26.x does not.
+    if (sc.current.parsed.matches('<26.1')) {
+        // Obfuscated environment (1.21.x): dependencies must be remapped to the
+        // compile mappings, and the built jar is remapped to intermediary names.
+        mappings loom.officialMojangMappings()
+        modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+        modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+
+        // Cloth Config - in-game config screen (external dependency, deliberately NOT bundled:
+        // users install it themselves - compile-time and dev-runtime only)
+        modImplementation "maven.modrinth:cloth-config:${project.cloth_config_version}+fabric"
+
+        // Mod Menu - optional integration, deliberately NOT bundled
+        modImplementation "maven.modrinth:modmenu:${project.modmenu_version}"
+        // Mod Menu requires Placeholder API at runtime; only needed for the dev environment
+        modRuntimeOnly "maven.modrinth:placeholder-api:${project.placeholder_api_version}"
+    } else {
+        // Non-obfuscated environment (26.x): no remapping configurations exist,
+        // mods are consumed on the plain configurations.
+        implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+        implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+
+        implementation "maven.modrinth:cloth-config:${project.cloth_config_version}+fabric"
+
+        implementation "maven.modrinth:modmenu:${project.modmenu_version}"
+        runtimeOnly "maven.modrinth:placeholder-api:${project.placeholder_api_version}"
+    }
+
+    // MixinExtras is shipped by the loader at runtime; this is only for compile-time annotations.
+    compileOnly "io.github.llamalad7:mixinextras-fabric:0.5.5"
+
+    if (project.bundle_video_libraries.toBoolean()) {
+        // The Java binding layer (javacpp) plus the FFmpeg API classes.
+        include "org.bytedeco:javacpp:${project.javacpp_version}"
+        include "org.bytedeco:ffmpeg:${project.ffmpeg_version}"
+        // JNA for the libc setenv() call in AuraIntroClient (OpenAL inside sandboxes).
+        include "net.java.dev.jna:jna:${project.jna_version}"
+        // The prebuilt libraries, trimmed (see the trimFfmpegNatives tasks) and nested from the
+        // build-local repository.
+        project.ffmpegPlatforms.each { platform ->
+            include "net.bluegaria.ffmpeg:ffmpeg-natives-${platform}:${project.ffmpeg_version}"
+        }
+    }
+}
+
+// The nested jars are resolved when loom processes the mod jar - by then the trimmed jars must exist.
+tasks.matching { it.name == 'processIncludeJars' }.configureEach {
+    dependsOn tasks.matching { it.name.startsWith('trimFfmpegNatives') }
+}

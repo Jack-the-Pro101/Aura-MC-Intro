@@ -1,5 +1,6 @@
 package net.bluegaria.auraintro.client;
 
+//? if fabric {
 import com.terraformersmc.modmenu.api.ConfigScreenFactory;
 import com.terraformersmc.modmenu.api.ModMenuApi;
 import net.bluegaria.auraintro.client.compat.McCompat;
@@ -15,3 +16,4 @@ public class AuraIntroModMenu implements ModMenuApi {
         return parent -> McCompat.configScreen(AuraIntroConfig.class, parent);
     }
 }
+//?}

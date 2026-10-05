@@ -2,9 +2,10 @@ package net.bluegaria.auraintro.client.compat;
 
 import me.shedaniel.autoconfig.ConfigData;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.screens.Overlay;
 import net.minecraft.client.gui.screens.Screen;
-//? if 1.21.10 {
+//? if <1.21.11 {
 /*import me.shedaniel.autoconfig.AutoConfig;
 *///?} else {
 import me.shedaniel.autoconfig.AutoConfigClient;
@@ -49,7 +50,7 @@ public final class McCompat {
 
     /** Mirrors vanilla's re-init of a screen after the loading overlay is unloaded. */
     public static void reinitScreen(Screen screen, Minecraft minecraft, int width, int height) {
-        //? if 1.21.10 {
+        //? if <1.21.11 {
         /*screen.init(minecraft, width, height);
         *///?} else {
         screen.init(width, height);
@@ -58,10 +59,30 @@ public final class McCompat {
 
     /** Opens the Cloth Config screen for the given config class. */
     public static <T extends ConfigData> Screen configScreen(Class<T> configClass, Screen parent) {
-        //? if 1.21.10 {
+        //? if <1.21.11 {
         /*return AutoConfig.getConfigScreen(configClass, parent).get();
         *///?} else {
         return AutoConfigClient.getConfigScreen(configClass, parent).get();
         //?}
+    }
+
+    /** Pushes a uniform 2D scale onto the GUI pose. */
+    public static void pushScale(GuiGraphicsExtractor graphics, float factor) {
+        //? if >=1.21.6 {
+        graphics.pose().pushMatrix();
+        graphics.pose().scale(factor, factor);
+        //?} else {
+        /*graphics.pose().pushPose();
+        graphics.pose().scale(factor, factor, 1.0F);
+        *///?}
+    }
+
+    /** Pops what {@link #pushScale} pushed. */
+    public static void popScale(GuiGraphicsExtractor graphics) {
+        //? if >=1.21.6 {
+        graphics.pose().popMatrix();
+        //?} else {
+        /*graphics.pose().popPose();
+        *///?}
     }
 }

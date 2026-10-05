@@ -1,7 +1,7 @@
 package net.bluegaria.auraintro.client.video;
 
 import net.bluegaria.auraintro.client.config.AuraIntroConfig;
-import net.fabricmc.loader.api.FabricLoader;
+import net.bluegaria.auraintro.client.compat.Platform;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -70,7 +70,7 @@ public final class VideoAssets {
      * @return the unpacked file, or {@code null} when it could not be written
      */
     private static Path unpackBundled(String resource, String fileName) {
-        Path target = FabricLoader.getInstance().getConfigDir().resolve(CACHE_DIRECTORY).resolve(fileName);
+        Path target = Platform.configDir().resolve(CACHE_DIRECTORY).resolve(fileName);
         try {
             long bundledSize = bundledSize(resource);
             if (Files.isRegularFile(target) && (bundledSize <= 0L || Files.size(target) == bundledSize)) {

@@ -1,0 +1,39 @@
+modLoader = "javafml"
+loaderVersion = "[1,)"
+license = "GPL-3.0-only"
+
+[[mods]]
+# NeoForge mod ids may not contain a hyphen; assets and the config file keep the "aura-intro" name.
+modId = "auraintro"
+version = "${version}"
+displayName = "Aura-Intro"
+logoFile = "assets/aura-intro/icon.png"
+authors = "bluegaria"
+description = '''Replaces the vanilla loading/title screen presentation with a configurable video intro. One baked clip can cover the whole start-up: it plays behind the loading bar, freezes on a chosen frame while the game finishes loading, then continues as the intro while the progress bar, the buttons and the title screen texts fade in on their own timestamps.'''
+
+[[mixins]]
+config = "aura-intro.client.mixins.json"
+
+[[mixins]]
+config = "aura-intro.versioned.mixins.json"
+
+[[dependencies.auraintro]]
+modId = "neoforge"
+type = "required"
+versionRange = "${neoforge_range}"
+ordering = "NONE"
+side = "CLIENT"
+
+[[dependencies.auraintro]]
+modId = "minecraft"
+type = "required"
+versionRange = "${neoforge_minecraft_range}"
+ordering = "NONE"
+side = "CLIENT"
+
+[[dependencies.auraintro]]
+modId = "cloth_config"
+type = "required"
+versionRange = "[${cloth_config_min},)"
+ordering = "NONE"
+side = "CLIENT"

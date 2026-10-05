@@ -6,7 +6,7 @@ lives in `README.md` - keep that one short and readable, and put technical detai
 
 ## What the mod does
 
-A client-side Fabric mod for Minecraft **1.21.10, 1.21.11, 26.1, 26.2 and 26.3** that replaces the
+A client-side mod for **Fabric and NeoForge**, Minecraft **1.21 - 26.3**, that replaces the
 vanilla loading/title screen presentation with a configurable **video intro** - typically one baked
 clip that covers the whole start-up:
 
@@ -29,35 +29,73 @@ clip that covers the whole start-up:
 - the vanilla "MINECRAFT" wordmark can stay hidden while the video plays and **starts fading in the moment the
   video ends** (`fadeInAfterVideo`, on by default), so it cross-dissolves with the video's fade-out.
 
-Everything is configurable in-game through **Mod Menu → Config** (a Cloth Config screen; Cloth Config is an
-external dependency, Mod Menu is optional).
+Everything is configurable in-game through a Cloth Config screen (Cloth Config is an external dependency):
+**Mod Menu → Config** on Fabric (Mod Menu optional), NeoForge's own mod list **Config** button on NeoForge.
+
+## Supported versions (build nodes)
+
+One jar per (Minecraft version, loader). A node compiles against one Minecraft version; its jar declares the
+range it runs on:
+
+| Node MC  | Jar runs on      | NeoForge         | Notes                                                       |
+| -------- | ---------------- | ---------------- | ----------------------------------------------------------- |
+| 1.21.1   | 1.21 - 1.21.1    | 21.1 (1.21.1)    | Immediate-mode GUI, `setColor`, GL texture uploads          |
+| 1.21.3   | 1.21.2 - 1.21.3  | 21.2 - 21.3      | Batched GUI by `RenderType`                                 |
+| 1.21.4   | 1.21.4           | 21.4             |                                                             |
+| 1.21.5   | 1.21.5           | 21.5             | `GpuTexture` + command encoder (`IntBuffer` uploads)        |
+| 1.21.8   | 1.21.6 - 1.21.8  | 21.6 - 21.8      | GUI render state, `RenderPipeline`, `Matrix3x2fStack`       |
+| 1.21.10  | 1.21.9 - 1.21.10 | 21.9 - 21.10     | `LoadingOverlay.tick()`, `renderWithTooltipAndSubtitles`    |
+| 1.21.11  | 1.21.11          | 21.11            | `Identifier`, textures carry a `GpuSampler`                 |
+| 26.1     | 26.1.x           | 26.1 (26.1.2)    | Unobfuscated, `GuiGraphicsExtractor`                        |
+| 26.2     | 26.2             | 26.2             |                                                             |
+| 26.3     | 26.3             | 26.3 (beta)      | renderpearl API packages                                    |
+
+The grouped ranges (1.21.2/1.21.3, 1.21.6-1.21.8, 1.21.9/1.21.10) are hotfix-compatible releases; only the
+node's own Minecraft version is exercised by dev runs.
 
 ## Repository layout
 
 | Path                                                 | What it is                                                                                     |
 | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `src/client/java/.../client/AuraIntroClient.java`    | Client entrypoint (also sets `ALSOFT_DRIVERS`, see below)                                      |
-| `src/client/java/.../client/AuraIntroPreLaunch.java` | Pre-launch entrypoint: loads FFmpeg and preloads the first frame before the window exists      |
+| `src/client/java/.../client/AuraIntroCommon.java`    | Loader-independent start-up (config, `ALSOFT_DRIVERS`, preload), tick and shutdown hooks       |
+| `src/client/java/.../client/AuraIntroClient.java`    | Fabric client entrypoint (`//? if fabric`)                                                     |
+| `src/client/java/.../client/AuraIntroPreLaunch.java` | Fabric pre-launch entrypoint: loads FFmpeg before the window exists                            |
+| `src/client/java/.../client/AuraIntroModMenu.java`   | Fabric Mod Menu integration                                                                    |
+| `src/client/java/.../client/AuraIntroNeoForge.java`  | NeoForge entrypoint (`//? if neoforge`): FFmpeg warm-up, events, config screen extension point |
 | `src/client/java/.../client/config/`                 | `AuraIntroConfig` (the config model, Cloth Config annotations) and its holder                  |
 | `src/client/java/.../client/video/AuraIntroVideoManager.java` | The intro state machine: scenes, timings, hand-over, loops, watchdogs                 |
 | `src/client/java/.../client/video/FfmpegVideoPlayer.java`     | FFmpeg player: demux, decode (software/hardware), RGBA conversion, A/V clock          |
 | `src/client/java/.../client/video/VideoFrameSink.java`        | Triple-buffered hand-off from the decode thread to the render thread                  |
 | `src/client/java/.../client/video/VideoTextureLayer.java`     | GPU texture per scene and how it is drawn (fit modes, sampler)                         |
 | `src/client/java/.../client/video/*Output.java`               | Audio outputs: libpulse (`PulseAudioOutput`) and Java Sound fallback                   |
-| `src/client/java/.../client/compat/McCompat.java`    | Small per-version API shims                                                                    |
+| `src/client/java/.../client/compat/McCompat.java`    | Small per-version API shims (screen/overlay access, pose stack, config screen)                 |
+| `src/client/java/.../client/compat/Platform.java`    | The loader-specific calls (config and game directory)                                          |
 | `src/client/java/.../mixin/client/`                  | Mixins into the loading overlay, title screen, widgets, music manager, ...                     |
 | `src/main/resources/assets/aura-intro/video/`        | The bundled default video (`default_intro.webm`, 3840x2160 VP9 + Opus, 25 fps)                 |
-| `versions/<mc>/gradle.properties`                    | Per-Minecraft-version dependency versions, Java target, versioned mixins                       |
-| `gradle/common.gradle`                               | Shared build logic: FFmpeg natives trimming/bundling, Stonecutter name swaps                   |
+| `src/main/resources/fabric.mod.json`, `META-INF/neoforge.mods.toml` | Mod metadata; each loader's jar only gets its own |
+| `gradle/mc/<mc>.properties`                          | Per-Minecraft-version values for both loaders: dependency versions, ranges, Java target       |
+| `settings.gradle`                                    | The node matrix (`<mc>-<loader>`) and which build script each node uses                        |
+| `build.gradle` / `build.remap.gradle` / `build.neoforge.gradle` | Node build scripts: Fabric 26.x, Fabric 1.21.x (remapping), NeoForge         |
+| `gradle/common.gradle`                               | Shared build logic: properties, Stonecutter constants and name swaps, FFmpeg natives trimming  |
+| `gradle/fabric.gradle`, `gradle/neoforge.gradle`     | Loader-specific dependencies, jar-in-jar, runs                                                 |
 | `gradle/ffmpeg/`                                     | Minimal FFmpeg build script and the committed per-platform library zips                        |
 | `sources/` (not committed)                           | Local FFmpeg source checkout, handy for reading `libswscale`/`hwcontext_vaapi.c`                |
 
 ## Conventions
 
-- **Stonecutter**: one shared source tree, built once per Minecraft version. Version differences are
-  written as Stonecutter comment conditions (`//? if >=26.1 { ... //?} else { /* ... *///?}`) and as name
-  swaps in `gradle/common.gradle`. The active version (the one `src/` reflects in the IDE and in
-  `./gradlew build`) is set in `stonecutter.gradle`. Always check that a change compiles for every version.
+- **Stonecutter**: one shared source tree, built once per node. Version differences are written as Stonecutter
+  comment conditions (`//? if >=26.1 { ... //?} else { /* ... *///?}`), loader differences the same way with the
+  `fabric` / `neoforge` constants (`//? if neoforge {`), and a few name swaps live in `gradle/common.gradle`.
+  The active node (the one `src/` reflects in the IDE) is set in `stonecutter.gradle` (`26.2-fabric`); code for
+  other nodes sits in `src/` commented out, with nested block comments escaped as `/^ ... ^/` - so never put
+  `/^` inside a string in such a block (that is why the NeoForge lambda selector has no `^` anchor).
+- **Prefer one branch per GUI generation** over clever sharing: the mixin targets (`blit`, `blitSprite`,
+  `innerBlit`, `drawString`, splash) changed signature at 1.21.2, 1.21.6 and 26.1, and each generation gets its
+  own handler. Mixin target strings are not checked by the compiler - only a game run validates them, and a
+  missing target crashes at class load (`defaultRequire: 1`).
+- **NeoForge patches some vanilla code** the mixins hook: `TitleScreen` draws its branding lines (the version line
+  among them) through `BrandingControl` lambdas; before 1.21.6 those lambdas are hooked by regex selector.
+  Regex selectors only work on NeoForge - on Fabric 1.21.x the names are remapped and regexes are not.
 - **Comments explain why**, usually with the concrete failure that motivated the code. Match the existing
   density and tone; the codebase is heavily commented on purpose.
 - **Threads**: the client/render thread never calls into FFmpeg. Decoding, conversion and audio run on the
@@ -71,22 +109,42 @@ external dependency, Mod Menu is optional).
 ## Building
 
 ```bash
-./gradlew build            # builds the active version (see stonecutter.gradle)
-./gradlew :1.21.10:build   # builds one specific version
-./gradlew :1.21.10:build :1.21.11:build :26.1:build :26.2:build :26.3:build
-./gradlew compileClientJava --offline   # quick compile check of every version
+./gradlew :1.21.1-neoforge:build            # one node
+./gradlew build                             # every node (20 jars)
+./gradlew compileClientJava                 # quick compile check of every node
 ```
 
-Each build lands in `versions/<mc>/build/libs/` as `Aura-Intro-<mod version>+<mc>.jar`. The 1.21.x builds are
-remapped to intermediary names (classic Fabric tooling, `fabric-loom-remap`), while the 26.x builds compile
-directly against the unobfuscated jars (loom's non-obfuscated mode).
+Each build lands in `versions/<node>/build/libs/` as `Aura-Intro-<mod version>+<mc>-<loader>.jar`. Fabric 1.21.x
+builds are remapped to intermediary names (`fabric-loom-remap`; loom rewrites the mixin target strings in place,
+there is no refmap), Fabric 26.x builds compile against the unobfuscated jars, and NeoForge builds use
+ModDevGradle on Mojang's names throughout.
+
+ModDevGradle needs a **Java 21 toolchain** for its tools (and 1.21.x NeoForge runs on it). Gradle finds
+installed JDKs on its own; where it cannot (NixOS), point it at one:
+`-Porg.gradle.java.installations.paths=/path/to/jdk21`.
+
+The Modrinth and local FFmpeg repositories are declared with `exclusiveContent`: before that, one 502 from
+NeoForge's maven while it was (pointlessly) asked for a Modrinth artifact disabled that repository for the
+whole build.
 
 ### Running it
 
-`./gradlew :26.3:runClient` starts a dev client with its run directory at `versions/26.3/run/` (gitignored;
-its `config/aura-intro.json` is the dev config - turn `debugLogging` on there). On NixOS the FFmpeg natives
-need system libraries on `LD_LIBRARY_PATH` (the Prism Launcher wrapper's value works). Logs go to
-`versions/26.3/run/logs/latest.log`.
+`./gradlew :<node>:runClient` (e.g. `:1.21.1-neoforge:runClient`) starts a dev client with its run directory at
+`versions/<node>/run/` (gitignored; its `config/aura-intro.json` is the dev config - turn `debugLogging` on
+there). On NixOS the FFmpeg natives need system libraries on `LD_LIBRARY_PATH` (the Prism Launcher wrapper's
+value works). Logs go to `versions/<node>/run/logs/latest.log`. Reaching the title screen with the video playing
+validates every mixin of that node.
+
+NeoForge dev-run quirks:
+
+- NeoForge 21.1-21.8 (FML with ModLauncher) does not show plain classpath libraries to mods in dev runs, so
+  `gradle/neoforge.gradle` also puts FFmpeg on `additionalRuntimeClasspath` for those versions. Built jars nest
+  it with jar-in-jar instead (one artifact per platform: jar-in-jar tells nested jars apart by group and
+  artifact only).
+- NeoForge 21.9+ shows a "warnings while loading mods" screen because Cloth Config uses `@OnlyIn`; click
+  through it.
+- NeoForge's early loading window needs an OpenGL visual; where there is none (the 26.3 test machine),
+  `earlyWindowControl = false` in the run's `config/fml.toml` gets past it.
 
 Useful debug log lines when checking playback:
 
@@ -228,14 +286,20 @@ used after a few seconds so the loading screen still clears.
   thread is busy are dropped instead of queued.
 - **Alpha**: for opaque scenes the alpha channel is forced on the decode thread; after five frames without any
   transparency the pass is dropped entirely (at 4K it cost more than everything else per frame).
-- **Upload/draw**: the render thread hands the newest buffer straight to the device's command encoder
-  (`VideoTextureUploader`), skipping Minecraft's `NativeImage` copy, and draws it through the vanilla GUI
-  render pipeline (render-state system on 26.x, `GuiGraphics` on 1.21.x). 26.x builds use a **linear,
-  clamp-to-edge** sampler instead of the nearest/repeat one Minecraft gives dynamic textures (point sampling
-  made the picture blocky); on 1.21.x the GUI pipeline picks the sampler.
+- **Upload/draw**: the render thread hands the newest buffer straight to the GPU (`VideoTextureUploader`: the
+  device's command encoder from 1.21.5 on, a plain `glTexSubImage2D` before), skipping Minecraft's
+  `NativeImage` copy, and draws it with the GUI's own `innerBlit` (`GuiGraphicsInvoker` /
+  `GuiGraphicsExtractorInvoker`, one signature per GUI generation). The video is filtered **linearly** instead of
+  the nearest-neighbour sampling Minecraft gives dynamic textures (point sampling made the picture blocky):
+  `setFilter` up to 1.21.10, the texture's own `GpuSampler` on 1.21.11, a per-draw sampler on 26.x.
+- **Immediate-mode quirks (before 1.21.6)**: 1.21.1 draws the video right away, so the loading overlay's
+  additive blend mode is reset for it and restored for the logo; 1.21.2-1.21.5 batch GUI draws, so the menu
+  background loop is flushed before vanilla's blur post-processes the framebuffer.
 - **Thread priority**: the decode thread runs at normal priority. Demoting it below normal once starved the
   whole picture pipeline on Windows, one of the platforms that actually enforces Java thread priorities.
-- **Preload**: the first frame is decoded during early start-up (`AuraIntroPreLaunch`) and the decoder parks
+- **Preload**: the first frame is decoded during early start-up (Fabric's `AuraIntroPreLaunch`, NeoForge's mod
+  constructor - NeoForge has no pre-launch hook, but it runs during NeoForge's own early loading screen, still
+  well before the vanilla one) and the decoder parks
   itself on it, so the video is on screen the moment the loading screen appears and playback continues from
   that frame - no seek, no decoder flush. The preload is silent; volume is only applied once it is visible.
 - **One player for both scenes**: with a baked video there is exactly one video player and one texture, so the

@@ -13,11 +13,14 @@ import net.bluegaria.auraintro.mixin.client.GuiGraphicsExtractorInvoker;
 *///?}
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
+//? if >=1.21.6 {
 import net.minecraft.client.renderer.RenderPipelines;
+//?} else if >=1.21.2 {
+/*import net.minecraft.client.renderer.RenderType;
+*///?}
 import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.client.renderer.texture.TextureManager;
 import net.minecraft.resources.Identifier;
-import net.minecraft.util.ARGB;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -98,9 +101,35 @@ public final class VideoTextureLayer {
             if (this.pendingTexture != null) {
                 this.pendingTexture.close();
             }
-            this.pendingTexture = new DynamicTexture(() -> this.label, width, height, true);
+            this.pendingTexture = createTexture(width, height);
         }
         return this.pendingTexture;
+    }
+
+    /**
+     * A texture of the given size, filtered linearly where the texture carries its filter (before 26.1; from
+     * 26.1 on the sampler is chosen per draw, see {@code videoSampler}). Minecraft creates dynamic textures
+     * point-sampled, which makes a video scaled to the screen look blocky.
+     */
+    private DynamicTexture createTexture(int width, int height) {
+        //? if >=26.1 {
+        return new DynamicTexture(() -> this.label, width, height, true);
+        //?} else if 1.21.11 {
+        /*// 1.21.11 keeps the sampler on the texture, and innerBlit draws with it.
+        return new DynamicTexture(() -> this.label, width, height, true) {
+            {
+                this.sampler = RenderSystem.getSamplerCache().getClampToEdge(com.mojang.blaze3d.textures.FilterMode.LINEAR);
+            }
+        };
+        *///?} else if >=1.21.5 {
+        /*DynamicTexture texture = new DynamicTexture(() -> this.label, width, height, true);
+        texture.setFilter(true, false);
+        return texture;
+        *///?} else {
+        /*DynamicTexture texture = new DynamicTexture(width, height, true);
+        texture.setFilter(true, false);
+        return texture;
+        *///?}
     }
 
     private static boolean matches(DynamicTexture texture, int width, int height) {
@@ -148,7 +177,7 @@ public final class VideoTextureLayer {
         // How large the picture is on screen, in physical pixels: the producer scales a source
         // bigger than that down during its RGBA conversion (see VideoFrameSink.noteOutputSize).
         // Written on every drawn frame, so window resizes track along on their own.
-        int guiScale = Minecraft.getInstance().getWindow().getGuiScale();
+        int guiScale = (int) Minecraft.getInstance().getWindow().getGuiScale();
         sink.noteOutputSize(guiWidth * guiScale, guiHeight * guiScale);
         sink.noteDrawnFrame();
 
@@ -162,14 +191,30 @@ public final class VideoTextureLayer {
                 videoSampler(),
                 Math.round(rect[0]), Math.round(rect[1]), Math.round(rect[2]), Math.round(rect[3]),
                 rect[4], rect[5], rect[6], rect[7],
-                ARGB.white(alpha));
-        //?} else {
+                whiteWithAlpha(alpha));
+        //?} else if >=1.21.6 {
         /*((GuiGraphicsInvoker) graphics).auraintro$innerBlit(
                 RenderPipelines.GUI_TEXTURED,
                 this.identifier,
                 Math.round(rect[0]), Math.round(rect[2]), Math.round(rect[1]), Math.round(rect[3]),
                 rect[4], rect[5], rect[6], rect[7],
-                ARGB.white(alpha));
+                whiteWithAlpha(alpha));
+        *///?} else if >=1.21.2 {
+        /*((GuiGraphicsInvoker) graphics).auraintro$innerBlit(
+                RenderType::guiTextured,
+                this.identifier,
+                Math.round(rect[0]), Math.round(rect[2]), Math.round(rect[1]), Math.round(rect[3]),
+                rect[4], rect[5], rect[6], rect[7],
+                whiteWithAlpha(alpha));
+        *///?} else {
+        /*// Immediate mode: the blend state is whatever the caller left (the loading overlay sets
+        // additive blending for its logo), and the video needs plain alpha blending.
+        RenderSystem.defaultBlendFunc();
+        ((GuiGraphicsInvoker) graphics).auraintro$innerBlit(
+                this.identifier,
+                Math.round(rect[0]), Math.round(rect[2]), Math.round(rect[1]), Math.round(rect[3]), 0,
+                rect[4], rect[5], rect[6], rect[7],
+                1.0F, 1.0F, 1.0F, alpha);
         *///?}
         return true;
     }
@@ -201,6 +246,11 @@ public final class VideoTextureLayer {
             this.pendingTexture.close();
             this.pendingTexture = null;
         }
+    }
+
+    /** Opaque white with the given alpha, as a packed ARGB colour (what vanilla's tint colours are). */
+    private static int whiteWithAlpha(float alpha) {
+        return (Math.round(Math.max(0.0F, Math.min(1.0F, alpha)) * 255.0F) << 24) | 0x00FFFFFF;
     }
 
     /** Scratch for {@link #fitRect}: the layer is drawn on the render thread only, so no per-frame allocation. */
