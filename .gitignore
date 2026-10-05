@@ -22,5 +22,8 @@ run/
 sources/
 ffmpeg-*
 
+# NeoForge local runs
+versions/**/*.eclipse
+
 # The committed minimal FFmpeg libraries (the ffmpeg-* rule above must not ignore them)
 !gradle/ffmpeg/libraries/**
