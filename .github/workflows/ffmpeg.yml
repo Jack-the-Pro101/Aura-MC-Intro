@@ -27,11 +27,11 @@ jobs:
         include:
           - platform: linux-x86_64
             os: ubuntu-24.04
-            packages: 'libva-dev' # VAAPI decode; NVDEC headers are installed below
+            packages: 'libva-dev' # VAAPI headers (compiled against, not linked); NVDEC headers are installed below
           - platform: linux-arm64
             os: ubuntu-24.04
-            # libva-dev:arm64 is what the VAAPI hardware acceleration cross-links against
-            # (build-minimal.sh points pkg-config at the arm64 .pc files).
+            # libva-dev:arm64 provides the VAAPI headers and the .pc files configure probes
+            # (build-minimal.sh points pkg-config at the arm64 ones); libva itself is not linked.
             packages: 'crossbuild-essential-arm64 libva-dev:arm64'
           - platform: windows-x86_64
             os: ubuntu-24.04

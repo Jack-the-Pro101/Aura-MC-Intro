@@ -53,8 +53,9 @@ case "$PLATFORM" in
     LIBS=("${LINUX_LIBS[@]}")
     # VAAPI like on x86_64: VAAPI (and CUDA, which has no ARM SBC counterpart) is what the player
     # tries on Linux, and Mesa ships VAAPI drivers for the SoCs that can run the game (RK3588 &
-    # friends). Unlike NVDEC, VAAPI is a link-time dependency, so the build needs the arm64
-    # libva: libva-dev:arm64 through multiarch (the workflow's Install toolchain step shows the
+    # friends). Unlike NVDEC, VAAPI needs libva's headers and configure's pkg-config probe
+    # (libva itself is not linked, see below), so the build needs the arm64 libva-dev:arm64 through
+    # multiarch (the workflow's Install toolchain step shows the
     # full setup - arm64 packages come from ports.ubuntu.com, not the amd64 archives), with
     # pkg-config pointed at the arm64 .pc files (done below). The kernel V4L2 m2m decoders are
     # no alternative here: the player opens the plain vp9 decoder, and v4l2m2m is a separate
@@ -145,6 +146,16 @@ echo "Configuring FFmpeg $FFMPEG_VERSION for $PLATFORM"
   ${HWACCEL[@]+"${HWACCEL[@]}"} \
   ${CROSS[@]+"${CROSS[@]}"}
 
+# Linux: compile the VAAPI code against libva's headers, but do not link libva. The libraries then
+# carry no libva.so.2/libva-drm.so.2 dependency (their va* symbols stay undefined and bind lazily),
+# so the jar needs no libva of its own: the mod loads the system's libva with RTLD_GLOBAL before
+# FFmpeg (FfmpegNativeLibrary) and only tries VAAPI when that worked. A bundled libva could not
+# drive current drivers anyway (old ABI, Debian-only driver path), and without the dependency
+# FFmpeg still loads on systems that have no libva at all.
+if [[ "$PLATFORM" == linux-* ]]; then
+  sed -i -E '/^EXTRALIBS/ s/(^|[ =])-lva(-drm)?\b/\1/g' ffbuild/config.mak
+fi
+
 make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 rm -rf "$REPO_ROOT/$OUT_DIR/$PLATFORM"
 make install
@@ -162,6 +173,18 @@ fi
 for lib in "${LIBS[@]}"; do
   cp -L "$LIB_SOURCE_DIR/$lib" "$STAGE/$lib"
 done
+
+# The libva link removal above edits configure's output, so a different FFmpeg release could
+# silently bring the dependency back - and the Gradle build would then drop the bundled libva
+# these libraries still need. Fail here instead.
+if [[ "$PLATFORM" == linux-* ]]; then
+  for lib in "${LIBS[@]}"; do
+    if readelf -d "$STAGE/$lib" | grep -E 'NEEDED.*\[libva'; then
+      echo "$lib still links libva (see the EXTRALIBS edit above)" >&2
+      exit 1
+    fi
+  done
+fi
 
 # macOS: plain install names (matching bytedeco's dylibs, which JavaCPP resolves through the
 # already-loaded image) and re-signing, which is mandatory after edits on Apple Silicon.

@@ -585,6 +585,13 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
                 attempts.add(hwDeviceTypeName(type) + ": not supported by the bundled FFmpeg");
                 continue;
             }
+            if (type == avutil.AV_HWDEVICE_TYPE_VAAPI && !FfmpegNativeLibrary.hasSystemLibva()) {
+                // Never call into VAAPI without it: the bundled FFmpeg does not link libva, so its
+                // first va* call would end the process with a symbol lookup error.
+                attempts.add(hwDeviceTypeName(type) + ": the system's libva (libva.so.2 and libva-drm.so.2) "
+                        + "could not be loaded - install libva");
+                continue;
+            }
             if (!createHwDevice(type, attempts)) {
                 continue;
             }
@@ -1146,7 +1153,17 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
         context.dst_h(dstHeight);
         context.dst_format(avutil.AV_PIX_FMT_RGBA);
         // Bilinear is exact for the 1:1 case (no scaling), so one flag covers both paths.
-        context.flags(swscale.SWS_BILINEAR);
+        int flags = swscale.SWS_BILINEAR;
+        if (SCALER_THREADS > 1 && (srcWidth != dstWidth || srcHeight != dstHeight)) {
+            // swscale's fast-rounding SIMD vertical scaler gets the first row of every slice but the
+            // first wrong at x = 2..5 when it scales: with N slice threads that drew N - 1 small,
+            // evenly spaced green/magenta dashes down the left edge of the video (seen at 1706x960,
+            // 1366x768, 854x480, ... - not at every size, and never 1:1). Accurate rounding takes the
+            // other SIMD path, whose threaded output is identical to the single-threaded one; it costs
+            // about 0.7 ms per 1080p frame on 8 threads, still far below the single-threaded scale.
+            flags |= swscale.SWS_ACCURATE_RND;
+        }
+        context.flags(flags);
         context.threads(SCALER_THREADS);
         int ret = swscale.sws_init_context(context, null, null);
         if (ret < 0) {

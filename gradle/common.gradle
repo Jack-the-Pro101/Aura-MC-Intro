@@ -168,6 +168,24 @@ if (project.bundle_video_libraries.toBoolean()) {
                     customFolderFiles.each { file -> customLibs[file.name] = file.bytes }
                 }
 
+                // bytedeco's natives carry a libva 2.14 (plus the libdrm its DRM part needs) for
+                // their libavutil/libavcodec, which link it. The minimal Linux builds do not
+                // (build-minimal.sh compiles VAAPI without linking libva; the mod loads the system's
+                // libva itself), and that old libva could not drive current drivers anyway - so it is
+                // dropped once both libraries that would need it come from such a build. Older
+                // minimal builds still name libva.so.2 as a dependency and keep it bundled.
+                def vaLinkingLibs = customLibs.findAll { libName, bytes ->
+                    libName.startsWith('libavutil.so') || libName.startsWith('libavcodec.so')
+                }
+                def dropLibva = platform.startsWith('linux') && vaLinkingLibs.size() == 2
+                        && !vaLinkingLibs.values().any { bytes ->
+                            def text = new String(bytes as byte[], 'ISO-8859-1')
+                            text.contains('libva.so.2') || text.contains('libva-drm.so.2')
+                        }
+                if (dropLibva) {
+                    logger.lifecycle("Minimal FFmpeg libraries for {} do not link libva - not bundling bytedeco's libva", platform)
+                }
+
                 new java.util.zip.ZipFile(inputJar).withCloseable { zip ->
                     new java.util.zip.ZipOutputStream(new java.io.FileOutputStream(target)).withCloseable { out ->
                         out.setLevel(java.util.zip.Deflater.BEST_COMPRESSION)
@@ -178,6 +196,7 @@ if (project.bundle_video_libraries.toBoolean()) {
                                     || name.contains('postproc') || name.startsWith('jnijavacpp')
                                     || name in ['ffmpeg', 'ffprobe', 'ffmpeg.exe', 'ffprobe.exe']
                                     || entry.name.startsWith('META-INF/native-image/')
+                                    || (dropLibva && name in ['libva.so.2', 'libva-drm.so.2', 'libdrm.so.2'])
                             if (dropped) {
                                 return
                             }

@@ -281,6 +281,10 @@ used after a few seconds so the loading screen still clears.
   `sws_scale` is single-threaded even on a threaded context); measured on the bundled clip, 4K→1080p went from
   ~3.5 ms to ~0.8 ms per frame. Its destination must be a refcounted frame, so each staging buffer is wrapped
   in an `AVBufferRef` whose free callback does nothing - the sink owns that memory.
+  Whenever it scales, the conversion adds `SWS_ACCURATE_RND`: swscale's fast-rounding x86 vertical scaler gets
+  the first row of every slice but the first wrong at x = 2..5, which drew N-1 green/magenta dashes down the
+  left edge at many window sizes (1706x960, 1366x768, ...). Accurate rounding roughly doubles the conversion
+  cost (~0.75 → ~1.5 ms for 4K→1080p on 8 threads); the 1:1 path is unaffected and keeps the fast flags.
 - **Hand-off**: `VideoFrameSink` keeps three buffers - one published, one being written, one possibly being
   uploaded - so neither side waits for the other and no frame is copied. Frames produced while the render
   thread is busy are dropped instead of queued.
@@ -376,8 +380,20 @@ for Windows x86-64, Linux x86-64/ARM64 and macOS x86-64/ARM64 via jar-in-jar. On
 to `config/aura-intro/javacpp-cache/` and reused on every launch. No system FFmpeg or VLC is needed.
 
 The build trims each platform's natives jar to the libraries the player loads (verified against each library's
-`NEEDED` entries: `libavcodec` hard-links `libva`/`libavutil`/`libswresample`; `libavformat` links
-`libavcodec`). `avdevice`, `avfilter`, the command-line programs and GraalVM metadata are stripped.
+`NEEDED` entries: `libavcodec` links `libavutil`/`libswresample`; `libavformat` links `libavcodec`).
+`avdevice`, `avfilter`, the command-line programs and GraalVM metadata are stripped.
+
+**libva on Linux**: the mod always uses the **system's** libva. `FfmpegNativeLibrary` loads `libva.so.2` and
+`libva-drm.so.2` with `RTLD_GLOBAL` before FFmpeg, and VAAPI is only tried when that worked
+(`hasSystemLibva()`). The minimal builds compile VAAPI against libva's headers but do not link it
+(`build-minimal.sh` strips `-lva`/`-lva-drm` after configure and fails if a library still lists libva as
+`NEEDED`): their `va*` symbols bind lazily to the system copy, and FFmpeg still loads where there is no libva.
+That gate is load-bearing - a `va*` call without a loaded libva ends the process with a symbol lookup error.
+bytedeco's jar carries a libva 2.14 for its own libraries, which link it. That copy only searches Debian's
+`/usr/lib/x86_64-linux-gnu/dri` and only knows driver entry points up to `__vaDriverInit_1_14`, while current
+drivers export only their own (`__vaDriverInit_1_24` for Mesa 26), so it could never start VAAPI. The trim
+task drops it (with the `libdrm` it needs) once the platform's minimal `libavutil` and `libavcodec` do not
+name it as a dependency; older minimal zips and the bytedeco fallback keep it.
 
 ### Minimal FFmpeg build (GitHub Actions)
 
