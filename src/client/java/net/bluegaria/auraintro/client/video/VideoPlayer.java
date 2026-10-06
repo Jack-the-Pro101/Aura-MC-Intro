@@ -108,6 +108,19 @@ public interface VideoPlayer {
         return true;
     }
 
+    /**
+     * Lets the playback clock wait for the consumer: while nothing draws the picture (the render thread
+     * is blocked), playback - sound included - stops instead of running on unseen, and continues once
+     * the picture is drawn steadily again.
+     */
+    default void setFollowConsumer(boolean followConsumer) {
+    }
+
+    /** How often playback has waited for the consumer so far (see {@link #setFollowConsumer}). */
+    default long consumerWaits() {
+        return 0L;
+    }
+
     /** Starts playback of a preloaded session. */
     default void resumeFromPreload() {
     }

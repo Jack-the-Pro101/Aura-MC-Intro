@@ -146,6 +146,13 @@ public abstract class LoadingOverlayMixin {
     }
     *///?}
 
+    /** Keeps an already started fade-out at its beginning while the intro waits (see pinFadeOut). */
+    @Inject(method = "extractRenderState", at = @At("HEAD"))
+    private void auraintro$pinFadeOut(GuiGraphicsExtractor graphics, int mouseX, int mouseY,
+                                        float partialTick, CallbackInfo ci) {
+        AuraIntroVideoManager.get().pinFadeOut((LoadingOverlay) (Object) this);
+    }
+
     /**
      * The intro video is drawn on top of the overlay (so it covers the Mojang logo while it is
      * held), but still beneath the title screen buttons that are extracted as part of the screen.

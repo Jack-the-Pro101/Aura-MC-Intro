@@ -123,6 +123,9 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
      * Threads for the RGBA conversion. Scaling a 4K picture down to the window costs several ms on one
      * core and well under one on eight; past that the slices get too thin to gain anything.
      */
+    /** How long the picture may go undrawn before a consumer-following clock stops (see updateStarvation). */
+    private static final long STARVED_AFTER_NANOS = 300_000_000L;
+
     private static final int SCALER_THREADS = Math.max(1, Math.min(8, Runtime.getRuntime().availableProcessors() / 2));
 
     /**
@@ -187,6 +190,19 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     // Control values, written from the client thread.
     private volatile float volume = 1.0f;
     private volatile boolean paused;
+    /**
+     * {@link #paused} is the union of two reasons: the owner's pause ({@link #setPaused}, and the
+     * preload parking itself) and starvation ({@link #updateStarvation}). They are kept apart so
+     * that ending one never ends the other - and both stop the clock through the same
+     * {@link #pausedAtNanos}, so a pause inside a starvation is not subtracted twice.
+     */
+    private volatile boolean ownerPaused;
+    private volatile boolean starved;
+    /** See {@link #setFollowConsumer}. */
+    private volatile boolean followConsumer;
+    /** When the current starvation began; decode thread only. */
+    private long starvedSinceNanos;
+    private volatile long starvations;
     private volatile long seekRequestMs = -1L;
     /** Loop region (see {@link #setLoopRegion}); a negative start means no looping. */
     private volatile long loopStartMs = -1L;
@@ -804,9 +820,11 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
                     // visible frames of the video. The pause timestamp is recorded so the wall
                     // clock freezes for the park; the audio feed resumes with the real sound
                     // right after it (see audioLoop).
+                    this.ownerPaused = true;
                     this.paused = true;
                     this.pausedAtNanos = System.nanoTime();
                 }
+                updateStarvation();
                 if (this.paused) {
                     if (!this.singleFrameAfterSeek) {
                         sleepUnchecked(10);
@@ -1769,7 +1787,58 @@ public final class FfmpegVideoPlayer implements VideoPlayer {
     }
 
     @Override
-    public void setPaused(boolean paused) {
+    public synchronized void setPaused(boolean paused) {
+        this.ownerPaused = paused;
+        applyPause();
+    }
+
+    @Override
+    public void setFollowConsumer(boolean followConsumer) {
+        this.followConsumer = followConsumer;
+    }
+
+    /**
+     * Stops the playback clock while nothing draws the picture, when the owner asked for that
+     * ({@link #setFollowConsumer} - the loading scene). Mods that do their start-up work on the
+     * render thread (shader packs compiling, map mods initialising, ...) can keep it from drawing
+     * for seconds at a time; the clock used to run on regardless, so the loading scene reached its
+     * hold frame having shown two frames of the way there, and the sound played over a frozen
+     * picture. Now picture and sound wait together and continue where the screen stopped once it
+     * is drawn steadily again. Decode thread only.
+     */
+    private void updateStarvation() {
+        if (!this.starved) {
+            if (this.followConsumer && !this.paused
+                    && this.sink.consumerAbsentNanos(System.nanoTime()) > STARVED_AFTER_NANOS) {
+                this.starvedSinceNanos = System.nanoTime();
+                this.starvations++;
+                setStarved(true);
+            }
+            return;
+        }
+        if (!this.followConsumer || this.closed || this.sink.consumerSteady(System.nanoTime())) {
+            setStarved(false);
+            long starvedMs = (System.nanoTime() - this.starvedSinceNanos) / 1_000_000L;
+            if (this.debug && starvedMs >= 1000L) {
+                LOGGER.info("The picture was not drawn for {} ms (the render thread was busy) - playback "
+                        + "waited for it at {} ms", starvedMs, this.cachedTimeMs);
+            }
+        }
+    }
+
+    @Override
+    public long consumerWaits() {
+        return this.starvations;
+    }
+
+    private synchronized void setStarved(boolean starved) {
+        this.starved = starved;
+        applyPause();
+    }
+
+    /** Applies {@link #ownerPaused} or {@link #starved} - whichever holds - to the clock and the sound. */
+    private synchronized void applyPause() {
+        boolean paused = this.ownerPaused || this.starved;
         if (this.paused == paused) {
             return;
         }

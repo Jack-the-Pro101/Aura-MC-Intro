@@ -77,8 +77,15 @@ public final class VideoFrameSink {
     private volatile int outputHeight;
     /** Smoothed time between two frames the consumer drew, in ms (see noteDrawnFrame). */
     private volatile double drawIntervalMs = 1000.0 / 60.0;
-    /** When the consumer last drew; render thread only. */
-    private long lastDrawNanos;
+    /** When the consumer last drew; written by the render thread, read by the producer's starvation check. */
+    private volatile long lastDrawNanos;
+    /** Since when the consumer has been drawing without a gap longer than {@link #STEADY_GAP_NANOS}. */
+    private volatile long drawStreakSinceNanos;
+
+    /** A gap between two draws longer than this breaks a steady streak (see {@link #consumerSteady}). */
+    private static final long STEADY_GAP_NANOS = 100_000_000L;
+    /** How long the consumer has to draw steadily before it counts as back (see {@link #consumerSteady}). */
+    private static final long STEADY_FOR_NANOS = 250_000_000L;
     /** The upload cap the consumer last asked for (uploadIfDirty), 0 = none. */
     private volatile int uploadMaxFps;
 
@@ -107,6 +114,9 @@ public final class VideoFrameSink {
     public void noteDrawnFrame() {
         long now = System.nanoTime();
         long last = this.lastDrawNanos;
+        if (last == 0L || now - last > STEADY_GAP_NANOS) {
+            this.drawStreakSinceNanos = now;
+        }
         this.lastDrawNanos = now;
         if (last == 0L) {
             return;
@@ -117,6 +127,24 @@ public final class VideoFrameSink {
             return;
         }
         this.drawIntervalMs += (intervalMs - this.drawIntervalMs) * 0.1;
+    }
+
+    /**
+     * How long the consumer has not drawn the picture, or 0 when it never has. Read by the producer, which
+     * stops the playback clock while nothing is drawing it (see FfmpegVideoPlayer.updateStarvation).
+     */
+    public long consumerAbsentNanos(long now) {
+        long last = this.lastDrawNanos;
+        return last == 0L ? 0L : now - last;
+    }
+
+    /**
+     * Whether the consumer is drawing at a steady pace again: recently, and for a little while without a
+     * long gap - one frame squeezed in between two blocking start-up tasks is not that yet.
+     */
+    public boolean consumerSteady(long now) {
+        long last = this.lastDrawNanos;
+        return last != 0L && now - last < STEADY_GAP_NANOS && now - this.drawStreakSinceNanos >= STEADY_FOR_NANOS;
     }
 
     /**

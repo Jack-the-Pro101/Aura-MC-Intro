@@ -157,6 +157,7 @@ public final class AuraIntroVideoManager {
     private int titlePassHeight;
     private long loadingFpsBaseline = -1L;
     private long loadingFpsBaselineMs;
+    private long loadingFpsBaselineWaits;
     private long lastIntroFrameCount = -1L;
     private long lastIntroUploadCount = -1L;
     private long lastIntroUploadMs;
@@ -395,10 +396,16 @@ public final class AuraIntroVideoManager {
         // persistent loop is configured, which only pauses until the title screen is back. No screen at
         // all with a world loaded is in-game; no screen without one is the start-up, before the title
         // screen exists.
+        // While the loading overlay the intro took over still covers everything, the screen beneath it
+        // says nothing: vanilla only installs the title screen when the overlay starts fading out, and
+        // until then it is the "Loading Minecraft" message screen - which, taken for the player having
+        // left the title screen, ended the intro right at the hand-over.
         Screen currentScreen = McCompat.currentScreen(minecraft);
-        boolean awayFromTitle = currentScreen != null
+        Overlay coveringOverlay = McCompat.currentOverlay(minecraft);
+        boolean underIntroOverlay = coveringOverlay instanceof LoadingOverlay covering && isIntroOverlay(covering);
+        boolean awayFromTitle = !underIntroOverlay && (currentScreen != null
                 ? !(currentScreen instanceof TitleScreen)
-                : minecraft.level != null;
+                : minecraft.level != null);
         this.onTitleScreen = !awayFromTitle;
         boolean inMenus = awayFromTitle && minecraft.level == null && cfg.timing.loopInOtherMenus;
         if (awayFromTitle && !persistsLoop(cfg)) {
@@ -846,6 +853,7 @@ public final class AuraIntroVideoManager {
         this.waitingForBackground = false;
         this.backgroundActive = false;
         this.backgroundStartRequested = false;
+        this.player.setFollowConsumer(false);
         if (minecraft != null && this.loadingLayerRetired) {
             this.backgroundTexture.release(minecraft.getTextureManager());
         }
@@ -903,6 +911,9 @@ public final class AuraIntroVideoManager {
         if (this.backgroundTexture.upload(player, cfg.video.videoMaxFps)) {
             this.backgroundFramesUploaded++;
         }
+        // While the loading scene plays, its clock waits whenever the render thread cannot draw it
+        // (start-up work of other mods): otherwise the clip reaches its hold frame unseen.
+        player.setFollowConsumer(this.backgroundActive && !this.backgroundFrozen);
 
         long elapsed = Util.getMillis() - this.backgroundStartMs;
         float alpha = 1.0F;
@@ -955,6 +966,8 @@ public final class AuraIntroVideoManager {
         // From here on the title screen owns the video: the loading scene's layer is never drawn again
         // (see loadingLayerRetired), so its frozen hold frame cannot reappear over the title screen.
         this.loadingLayerRetired = true;
+        // The intro keeps the wall clock: its timeline (buttons, texts) must not stretch.
+        this.player.setFollowConsumer(false);
         traceHandOver("loading layer retired", "the title screen owns the video from here");
         this.t0Ms = Util.getMillis();
         if (cfg.general.debugLogging) {
@@ -1278,6 +1291,30 @@ public final class AuraIntroVideoManager {
     }
 
     /**
+     * Called by {@link net.bluegaria.auraintro.mixin.client.LoadingOverlayMixin} before the overlay renders:
+     * while the intro waits for the loading video to reach its hold frame, a fade-out vanilla has already
+     * started is kept at its very beginning, so the overlay stays the loading screen and is not dropped.
+     *
+     * <p>The fade-out is not prevented from starting: from 1.21.9 on vanilla starts it in
+     * {@code LoadingOverlay.tick()}, before this mod's end-of-tick notices the wait - and starting it is
+     * also what installs the title screen (the overlay's {@code onFinish}). Holding the start instead
+     * left 26.x's "Loading Minecraft" message screen in place at the hand-over, which the intro took for
+     * the player having left the title screen and ended itself. Without either, the overlay faded away a
+     * second after loading and the wait ended with it.</p>
+     */
+    public void pinFadeOut(LoadingOverlay overlay) {
+        AuraIntroConfig cfg = AuraIntroConfigHolder.get();
+        if (!cfg.general.enabled || this.anchorSet || this.failed || this.broken
+                || !(this.waitingForBackground || shouldWaitForBackgroundVideo(cfg))) {
+            return;
+        }
+        LoadingOverlayAccessor accessor = (LoadingOverlayAccessor) overlay;
+        if (accessor.getFadeOutStart() > -1L) {
+            accessor.setFadeOutStart(Util.getMillis());
+        }
+    }
+
+    /**
      * Consulted by {@link net.bluegaria.auraintro.mixin.client.LoadingOverlayMixin}:
      * while this returns {@code true} vanilla is not allowed to start fading the overlay out, so
      * the Mojang logo stays on screen until the configured video timestamp.
@@ -1443,9 +1480,13 @@ public final class AuraIntroVideoManager {
         // audio needs the same CPU, so this is the number that explains both.
         if (this.backgroundActive && !this.backgroundFrozen && !this.loadingFrameRateReported) {
             long produced = this.player.sink().producedFrames();
-            if (this.loadingFpsBaseline < 0L) {
+            long waits = this.player.consumerWaits();
+            if (this.loadingFpsBaseline < 0L || waits != this.loadingFpsBaselineWaits) {
+                // (Re)start the measurement - also after playback waited for a busy render thread
+                // (see setFollowConsumer): frames not produced then say nothing about the decoder.
                 this.loadingFpsBaseline = produced;
                 this.loadingFpsBaselineMs = now;
+                this.loadingFpsBaselineWaits = waits;
             } else if (now - this.loadingFpsBaselineMs >= 1500L) {
                 this.loadingFrameRateReported = true;
                 long elapsedMs = Math.max(1L, now - this.loadingFpsBaselineMs);

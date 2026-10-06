@@ -353,6 +353,15 @@ context. The download is known to be expensive on Intel iGPUs at 4K (`av_hwframe
   delivering frames, and the intro is treated as ended so it fades out/freezes normally.
 - An intro player that starts but never delivers a frame is restarted (up to 3 attempts); a failed start is
   retried instead of disabling the video for the session.
+- The loading scene's clock waits for the screen (`setFollowConsumer`): mods that do start-up work on the render
+  thread (shader packs compiling, map mods, ...) can keep it from drawing for seconds, and the clip used to
+  reach `holdAtMs` unseen. When nothing has drawn the picture for 300 ms, picture and sound pause on the decode
+  thread, and they resume once it has been drawn steadily for 250 ms. With `waitUntilHoldMsReached` the loading
+  screen then stays up until the clip has actually played to the hold frame. That wait does not hold back vanilla's
+  fade-out start, which is also what installs the title screen (until then 26.x and 1.21.x show a "Loading
+  Minecraft" message screen, which the intro must not mistake for the player leaving the title screen).
+  Instead the started fade is pinned at its beginning (`pinFadeOut`). The intro (title screen) keeps
+  the wall clock, so its timeline never stretches.
 - Player start-up and teardown are serialised, so the loading-to-intro hand-over cannot interleave inside the
   FFmpeg contexts.
 - With `debugLogging`, a watchdog notices a frozen client (no tick for 10 s) and writes a **thread dump** into
